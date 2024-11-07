@@ -7,14 +7,14 @@ from marshmallow import fields
 from pyrh import urls
 from pyrh.exceptions import PyrhValueError
 
-from .base import (
+from pyrh.models.base import (
     BaseModel,
     BasePaginator,
     BasePaginatorSchema,
     BaseSchema,
     base_paginator,
 )
-from .sessionmanager import SessionManager
+from pyrh.models.sessionmanager import SessionManager
 
 
 # TODO: dream up a good way to not require session to `get_fundamentals` without a
@@ -68,7 +68,7 @@ class InstrumentSchema(BaseSchema):
     symbol = fields.Str()
     tradability = fields.Str()
     tradable_chain_id = fields.Str(allow_none=True)  # TODO: determine possible values
-    tradeable = fields.Boolean()  # looks like they're mixing UK and US english
+    tradeable = fields.Boolean()  # looks like they"re mixing UK and US english
     type = fields.Str()  # TODO: determine possible values
     url = fields.URL()
 

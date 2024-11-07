@@ -46,6 +46,7 @@ class BaseModel(SimpleNamespace):
         kwargs = {k: _process_dict_values(v) for k, v in kwargs.items()}
 
         self.__dict__.update(kwargs)
+        super().__init__(**kwargs)
 
     def __repr__(self) -> str:
         """Return a default repr of any Model.
@@ -64,7 +65,8 @@ class BaseModel(SimpleNamespace):
 class UnknownModel(BaseModel):
     """A convenience class that inherits from `BaseModel`."""
 
-    pass
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
 
 
 class BaseSchema(Schema):

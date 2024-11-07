@@ -48,9 +48,11 @@ OAUTH: URL = OAUTH_BASE / "token/"
 OAUTH_REVOKE: URL = OAUTH_BASE / "revoke_token/"
 MIGRATE_TOKEN: URL = OAUTH_BASE / "migrate_token/"  # not implemented
 PASSWORD_RESET: URL = API_BASE / "password_reset/request/"  # not implemented
+USER_MACHINE: URL = API_BASE / "pathfinder/user_machine/"
+INQUIRIES: URL = API_BASE / "pathfinder/inquiries"
+CHALLENGE: URL = API_BASE / "challenge"
 
-
-def build_challenge(challenge_id: str) -> URL:
+def challenge(challenge_id: str) -> URL:
     """Build challenge response url.
 
     Args:
@@ -62,8 +64,7 @@ def build_challenge(challenge_id: str) -> URL:
     """
     return API_BASE / f"challenge/{challenge_id}/respond/"
 
-
-def build_ach(option: str) -> URL:
+def ach(option: str) -> URL:
     """
     Combination of 3 ACH endpoints. Options include:
         * iav
@@ -71,7 +72,6 @@ def build_ach(option: str) -> URL:
         * transfers
     """
     return ACH_BASE / "iav/auth/" if option == "iav" else ACH_BASE / f"{option}/"
-
 
 def instruments(
     symbol: Optional[str] = None, query: Optional[str] = None, id_: Optional[str] = None
@@ -101,9 +101,8 @@ def instruments(
     elif id_ is not None:
         return INSTRUMENTS_BASE / f"{id_}/"
 
-
-def build_orders(order_id: Optional[str] = None) -> URL:
-    """Build endpoint to place orders."
+def orders(order_id: Optional[str] = None) -> URL:
+    """Build endpoint to place orders.
 
     Args:
         order_id: the id of the order
@@ -117,8 +116,7 @@ def build_orders(order_id: Optional[str] = None) -> URL:
     else:
         return ORDERS_BASE
 
-
-def build_news(stock: str) -> URL:
+def news(stock: str) -> URL:
     """Build news endpoint for a particular stock
 
     Args:
@@ -130,8 +128,7 @@ def build_news(stock: str) -> URL:
     """
     return NEWS_BASE / f"{stock}/"
 
-
-def build_fundamentals(stock: str) -> URL:
+def fundamentals(stock: str) -> URL:
     """Build fundamentals endpoint for a particular stock
 
     Args:
@@ -143,8 +140,7 @@ def build_fundamentals(stock: str) -> URL:
     """
     return FUNDAMENTALS_BASE / f"{stock}/"
 
-
-def build_tags(tag: str) -> URL:
+def tags(tag: str) -> URL:
     """Build endpoints for tickers with a particular tag.
 
     Args:
@@ -156,8 +152,7 @@ def build_tags(tag: str) -> URL:
     """
     return TAGS_BASE / f"{tag}/"
 
-
-def build_chain(instrument_id: str) -> URL:
+def chain(instrument_id: str) -> URL:
     """Build the query for a particular options chain.
 
     # TODO: this isn't best practice
@@ -174,8 +169,7 @@ def build_chain(instrument_id: str) -> URL:
         OPTIONS_CHAIN_BASE.with_query(equity_instrument_ids=f"{instrument_id}") / "/"
     )  # TODO: find out if this trailing slash is required.
 
-
-def build_options(chain_id: str, dates: str, option_type: str) -> URL:
+def options(chain_id: str, dates: str, option_type: str) -> URL:
     """Build options search endpoint.
 
     # TODO: this really isn't best practice.
@@ -193,8 +187,8 @@ def build_options(chain_id: str, dates: str, option_type: str) -> URL:
         type=f"{option_type}",
     )
 
-
-def build_market_data(option_id: Optional[str] = None) -> URL:
+@property
+def market_data(option_id: Optional[str] = None) -> URL:
     """Build market data endpoint.
 
     Args:
@@ -207,3 +201,6 @@ def build_market_data(option_id: Optional[str] = None) -> URL:
         return MARKET_DATA_BASE / f"{option_id}/"
     else:
         return MARKET_DATA_BASE
+
+def market_data_quotes(options_instruments):
+    market_data() / "quotes/?instruments=" / ",".join(options_instruments)

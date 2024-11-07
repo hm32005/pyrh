@@ -1,6 +1,7 @@
 """Oauth models."""
 
 from datetime import datetime
+from typing import Any
 
 import pytz
 from marshmallow import fields, validate
@@ -26,7 +27,7 @@ class Challenge(BaseModel):
 
         """
         return self.remaining_attempts > 0 and (
-            datetime.now(tz=pytz.utc) < self.expires_at
+                datetime.now(tz=pytz.utc) < self.expires_in
         )
 
 
@@ -44,11 +45,20 @@ class ChallengeSchema(BaseSchema):
     status = fields.Str(validate=validate.OneOf(["issued", "validated", "failed"]))
     remaining_retries = fields.Int()
     remaining_attempts = fields.Int()
-    expires_at = fields.AwareDateTime(default_timezone=pytz.UTC)  # type: ignore
+    expires_in = fields.AwareDateTime(default_timezone=pytz.UTC)  # type: ignore
 
 
 class OAuth(BaseModel):
     """The OAuth response model."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        if "access_token" in kwargs:
+            self.access_token = kwargs["access_token"]
+        if "refresh_token" in kwargs:
+            self.refresh_token = kwargs["refresh_token"]
+        if "expires_in" in kwargs:
+            self.expires_in = kwargs["expires_in"]
 
     @property
     def is_challenge(self) -> bool:

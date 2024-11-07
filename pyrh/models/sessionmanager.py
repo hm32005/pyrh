@@ -1,24 +1,34 @@
 """Manage Robinhood Sessions."""
-
+import json
+import logging
+import logging.config
+import subprocess
 import uuid
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union, cast
+from logging import Logger
+from pathlib import Path
+from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple, Union, cast
 from urllib.request import getproxies
 
 import certifi
 import pyotp as pyotp
-import pytz
 import requests
+from httplib2 import Response
 from marshmallow import Schema, fields, post_load
 from requests.exceptions import HTTPError
 from requests.structures import CaseInsensitiveDict
+import pendulum
 from yarl import URL
 
 from pyrh import urls
+from pyrh.constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
 from pyrh.exceptions import AuthenticationError, PyrhValueError
+from pyrh.models.base import BaseModel, BaseSchema, JSON
+from pyrh.models.oauth import (CHALLENGE_TYPE_VAL, OAuth, OAuthSchema)
+from pyrh.util import robinhood_headers, JSON_ENCODING
 
-from .base import JSON, BaseModel, BaseSchema
-from .oauth import CHALLENGE_TYPE_VAL, OAuth, OAuthSchema
+parent_dir = Path(__file__).parent
+# log_conf_path = os.path.join(parent_dir, os.pardir, os.pardir, os.pardir, "conf", "logging.conf")
+# logging.config.fileConfig(log_conf_path)
 
 # TODO: merge get and post duplicated code into a single function.
 
@@ -29,35 +39,16 @@ else:
     CaseInsensitiveDictType = CaseInsensitiveDict
 Proxies = Dict[str, str]
 
-
-# Constants
-CLIENT_ID: str = "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS"
-"""Robinhood client id."""
 HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(
-    {
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en;q=1, fr;q=0.9, de;q=0.8, ja;q=0.7, nl;q=0.6, it;q=0.5",
-        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-        "X-Robinhood-API-Version": "1.0.0",
-        "Connection": "keep-alive",
-        "User-Agent": "Robinhood/823 (iPhone; iOS 7.1.2; Scale/2.00)",
-    }
+    robinhood_headers
 )
 """Headers used when performing requests with robinhood api."""
-# 8.5 days (you have a small window to refresh after this)
-# I would refresh the token proactively every day in a script
-EXPIRATION_TIME: int = 734000
-"""Default expiration time for requests."""
-
-TIMEOUT: int = 3
-"""Default timeout in seconds"""
 
 
 class SessionManager(BaseModel):
     """Manage connectivity with Robinhood API.
 
-    This class manages logging in and multi-factor authentication. Optionally,
+    This class manages logging in and multifactor authentication. Optionally,
     it can automatically authenticate for automation systems
 
     Example:
@@ -66,14 +57,14 @@ class SessionManager(BaseModel):
         >>> sm.logout()  # xdoctest: +SKIP
 
     Example:
-        >>> sm = SessionManager(username="USERNAME", password="PASSWORD", mfa="16DIGITQRCODE")
+        >>> sm = SessionManager(username="USERNAME", password="PASSWORD", mfa="16 DIGIT QR CODE")
 
     If you want to bypass manual MFA authentication, you can supply your 16-digit QR code from Robinhood as a parameter
     as shown.
 
     Args:
-        username: The username to login to Robinhood
-        password: The password to login to Robinhood
+        username: The username to use for logging in to Robinhood
+        password: The password to use for logging in to Robinhood
         mfa: The 16 character QR code used to authenticate MFA automatically
         challenge_type: Either sms or email (only if not using mfa)
         headers: Any optional header dict modifications for the session
@@ -82,232 +73,59 @@ class SessionManager(BaseModel):
 
     Attributes:
         session: A requests session instance
-        expires_at: The time the oauth token will expire at, default is 1970-01-01 00:00:00
-        certs: The path to the desired certs to check against
+        expires_in: The time the oauth token will expire at, default is 1970-01-01 00:00:00
         device_token: A random guid representing the current device
-        access_token: An oauth2 token to connect to the Robinhood API
-        refresh_token: An oauth2 refresh token to refresh the access_token when required
 
     """
 
     def __init__(
-        self,
-        username: str,
-        password: str,
-        mfa: Optional[str] = "",
-        challenge_type: Optional[str] = "sms",
-        headers: Optional[CaseInsensitiveDictType] = None,
-        proxies: Optional[Proxies] = None,
-        **kwargs: Any,
+            self,
+            username: Optional[str] = None,
+            password: Optional[str] = None,
+            mfa: Optional[str] = "",
+            challenge_type: Optional[str] = "sms",
+            headers: Optional[CaseInsensitiveDictType] = None,
+            proxies: Optional[Proxies] = None,
+            **kwargs: Any
     ) -> None:
+        self.__logger: Logger = logging.getLogger(__name__)
+        self.__logger.info("Initializing session manager!")
         self.mfa = mfa
+        self.__logger.info("MFA Done!")
         self.session: requests.Session = requests.session()
+        self.__logger.info("Session done!")
         self.session.headers = HEADERS if headers is None else headers
+        self.__logger.info("Headers done!")
         self.session.proxies = getproxies() if proxies is None else proxies
+        self.__logger.info("Proxies done!")
         self.session.verify = certifi.where()
-        self.expires_at = datetime.strptime("1970", "%Y").replace(
-            tzinfo=pytz.UTC
-        )  # some time in the past
-
+        self.__logger.info("certifi done!")
+        self.expires_in = pendulum.datetime(1970, 1, 1, tz='UTC').int_timestamp  # some time in the past
+        self.__logger.info("expires_in done!")
         self.username: str = username
+        self.__logger.debug("username done!")
         self.password: str = password
+        self.__logger.debug("password done!")
         if challenge_type not in ["email", "sms"]:
             raise ValueError("challenge_type must be email or sms")
         self.challenge_type: str = challenge_type
-
+        self.__logger.info("challenge_type done!")
         self.device_token: str = kwargs.pop("device_token", str(uuid.uuid4()))
+        self.__logger.info("device_token done!")
         self.oauth: OAuth = kwargs.pop("oauth", OAuth())
+        self.__logger.info("oauth done!")
 
         super().__init__(**kwargs)
+        self.__logger.debug("super() done!")
 
-    @property
-    def token_expired(self) -> bool:
-        """Check if the issued auth token has expired.
-
-        Returns:
-            True if expired otherwise False
-        """
-        return datetime.now(tz=pytz.UTC) > self.expires_at
-
-    @property
-    def login_set(self) -> bool:
-        """Check if login info is properly configured.
+    def __repr__(self) -> str:
+        """Return the object as a string.
 
         Returns:
-            Whether or not username and password are set.
-        """
-        return self.password is not None and self.username is not None
-
-    @property
-    def authenticated(self) -> bool:
-        """Check if the session is authenticated.
-
-        Returns:
-            Whether or not the session is logged in.
-        """
-        return "Authorization" in self.session.headers and not self.token_expired
-
-    def login(self, force_refresh: bool = False) -> None:
-        """Login to the session.
-
-        This method logs the user in if they are not already and otherwise refreshes
-        the oauth token if it is expired.
-
-        Args:
-            force_refresh: If already logged in, whether or not to force a oauth token
-                refresh.
+            The string representation of the object.
 
         """
-        if "Authorization" not in self.session.headers:
-            self._login_oauth2()
-        elif self.oauth.is_valid and (self.token_expired or force_refresh):
-            self._refresh_oauth2()
-
-    def get(
-        self,
-        url: Union[str, URL],
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[CaseInsensitiveDictType] = None,
-        raise_errors: bool = True,
-        return_response: bool = False,
-        auto_login: bool = True,
-        schema: Optional[Schema] = None,
-        many: bool = False,
-    ) -> Any:
-        """Run a wrapped session HTTP GET request.
-
-        Note:
-            This method automatically prompts the user to log in if not already logged
-            in.
-
-        Args:
-            url: The url to get from.
-            params: query string parameters
-            headers: A dict adding to and overriding the session headers.
-            raise_errors: Whether or not raise errors on GET request result.
-            return_response: Whether or not return a `requests.Response` object or the
-                JSON response from the request.
-            auto_login: Whether or not to automatically login on restricted endpoint
-                errors.
-            schema: An instance of a `marshmallow.Schema` that represents the object
-                to build.
-            many: Whether to treat the output as a list of the passed schema.
-
-        Returns:
-            A JSON dictionary or a constructed object if a schema is passed. If \
-                `return_response` is set then a tuple of (response, data) is passed.
-
-        Raises:
-            PyrhValueError: If the schema is not an instance of `Schema` and is instead
-                a class.
-
-        """
-        # Guard against common gotcha, passing schema class instead of instance.
-        if isinstance(schema, type):
-            raise PyrhValueError("Passed Schema should be an instance not a class.")
-        params = {} if params is None else params
-        res = self.session.get(
-            str(url),
-            params=params,
-            timeout=TIMEOUT,
-            headers={} if headers is None else headers,
-        )
-        if res.status_code == 401 and auto_login:
-            self.login(force_refresh=True)
-            res = self.session.get(
-                str(url),
-                params=params,
-                timeout=TIMEOUT,
-                headers={} if headers is None else headers,
-            )
-        if raise_errors:
-            res.raise_for_status()
-
-        data = res.json() if schema is None else schema.load(res.json(), many=many)
-
-        return (data, res) if return_response else data
-
-    def post(
-        self,
-        url: Union[str, URL],
-        data: Optional[JSON] = None,
-        headers: Optional[CaseInsensitiveDictType] = None,
-        raise_errors: bool = True,
-        return_response: bool = False,
-        auto_login: bool = True,
-        schema: Optional[Schema] = None,
-        many: bool = False,
-    ) -> Any:
-        """Run a wrapped session HTTP POST request.
-
-        Note:
-            This method automatically prompts the user to log in if not already logged
-            in.
-
-        Args:
-            url: The url to post to.
-            data: The payload to POST to the endpoint.
-            headers: A dict adding to and overriding the session headers.
-            return_response: Whether or not return a `requests.Response` object or the
-                JSON response from the request.
-            raise_errors: Whether or not raise errors on POST request.
-            auto_login: Whether or not to automatically login on restricted endpoint
-                errors.
-            schema: An instance of a `marshmallow.Schema` that represents the object
-                to build.
-            many: Whether to treat the output as a list of the passed schema.
-
-        Returns:
-            A JSON dictionary or a constructed object if a schema is passed. If \
-                `return_response` is set then a tuple of (response, data) is passed.
-
-        Raises:
-            PyrhValueError: If the schema is not an instance of `Schema` and is instead
-                a class.
-
-        """
-        # Guard against common gotcha, passing schema class instead of instance.
-        if isinstance(schema, type):
-            raise PyrhValueError("Passed Schema should be an instance not a class.")
-
-        res = self.session.post(
-            str(url),
-            data=data,
-            timeout=TIMEOUT,
-            headers={} if headers is None else headers,
-        )
-        if (res.status_code == 401) and auto_login:
-            self.login(force_refresh=True)
-            res = self.session.post(
-                str(url),
-                data=data,
-                timeout=TIMEOUT,
-                headers={} if headers is None else headers,
-            )
-        if raise_errors:
-            res.raise_for_status()
-
-        data = res.json() if schema is None else schema.load(res.json(), many=many)
-
-        return (data, res) if return_response else data
-
-    def _configure_manager(self, oauth: OAuth) -> None:
-        """Process an authentication response dictionary.
-
-        This method updates the internal state of the session based on a login or
-        token refresh request.
-
-        Args:
-            oauth: An oauth response model from a login request.
-
-        """
-        self.oauth = oauth
-        self.expires_at = datetime.now(tz=pytz.UTC) + timedelta(
-            seconds=self.oauth.expires_in
-        )
-        self.session.headers.update(
-            {"Authorization": f"Bearer {self.oauth.access_token}"}
-        )
+        return f"SessionManager<{self.username}>"
 
     def _challenge_oauth2(self, oauth: OAuth, oauth_payload: JSON) -> OAuth:
         """Process the ouath challenge flow.
@@ -322,12 +140,12 @@ class SessionManager(BaseModel):
         Raises:
             AuthenticationError: If there is an error in the initial challenge response.
 
-        .. # noqa: DAR202
-        .. https://github.com/terrencepreilly/darglint/issues/81
+        # noqa: DAR202
+        https://github.com/terrencepreilly/darglint/issues/81
 
         """
         # login challenge
-        challenge_url = urls.build_challenge(oauth.challenge.id)
+        challenge_url = urls.challenge(oauth.challenge.id)
         print(
             f"Input challenge code from {oauth.challenge.type.capitalize()} "
             f"({oauth.challenge.remaining_attempts}/"
@@ -368,7 +186,177 @@ class SessionManager(BaseModel):
         else:
             raise AuthenticationError("Exceeded available attempts or code expired")
 
-    def _mfa_oauth2(self, oauth_payload: JSON, attempts: int = 3) -> OAuth:
+    def _challenge_response(self, challenge_id, mfa_code):
+        request_url = urls.CHALLENGE / f"{challenge_id}/respond/"
+        payload = {"response": mfa_code}
+        data, res = self.post(
+            request_url,
+            data=payload,
+            raise_errors=False,
+            auto_login=False,
+            return_response=True
+        )
+        if res.status_code != requests.codes.ok:
+            self.logger.error("Challenge Response Error")
+        elif res.status_code == requests.codes.ok and data["status"] == "validated":
+            return True
+        else:
+            raise AuthenticationError("Challenge Response Error")
+        return False
+
+    def _configure_manager(self, oauth: OAuth) -> None:
+        """Process an authentication response dictionary.
+
+        This method updates the internal state of the session based on a login or
+        token refresh request.
+
+        Args:
+            oauth: An oauth response model from a login request.
+
+        """
+        self.oauth = oauth
+        self.expires_in = self.oauth.expires_in
+        self.session.headers.update(
+            {"Authorization": f"Bearer {self.oauth.access_token}"}
+        )
+
+    @staticmethod
+    def _generate_request_id():
+        return str(uuid.uuid4())
+
+    def get(self,
+            url: Union[str, URL],
+            params: Optional[Dict[str, Any]] = None,
+            headers: Optional[CaseInsensitiveDictType] = None,
+            raise_errors: bool = True,
+            return_response: bool = False,
+            auto_login: bool = True,
+            schema: Optional[Schema] = None,
+            many: bool = False,
+            ) -> Tuple[Dict[str, Any], Response] | Dict[str, Any]:
+        """Run a wrapped session HTTP GET request.
+
+        Note:
+            This method automatically prompts the user to log in if not already logged
+            in.
+
+        Args:
+            url: The url to get from.
+            params: query string parameters
+            headers: A dict adding to and overriding the session headers.
+            raise_errors: Whether to raise errors on GET request result.
+            return_response: Whether to return a `requests.Response` object or the
+                JSON response from the request.
+            auto_login: Whether to automatically login on restricted endpoint
+                errors.
+            schema: An instance of a `marshmallow.Schema` that represents the object
+                to build.
+            many: Whether to treat the output as a list of the passed schema.
+
+        Returns:
+            A JSON dictionary or a constructed object if a schema is passed. If \
+                `return_response` is set then a tuple of (response, data) is passed.
+
+        Raises:
+            PyrhValueError: If the schema is not an instance of `Schema` and is instead
+                a class.
+
+        """
+        # Guard against common gotcha, passing schema class instead of instance.
+        if isinstance(schema, type):
+            raise PyrhValueError("Passed Schema should be an instance not a class.")
+        params = {} if params is None else params
+        res = self.session.get(
+            str(url),
+            params=params,
+            timeout=TIMEOUT,
+            headers=self.session.headers if headers is None else headers,
+        )
+        if res.status_code == 401 and auto_login:
+            self.login(force_refresh=True)
+            res = self.session.get(
+                str(url),
+                params=params,
+                timeout=TIMEOUT,
+                headers=self.session.headers if headers is None else headers,
+            )
+        if raise_errors:
+            res.raise_for_status()
+
+        data = res.json() if schema is None else schema.load(res.json(), many=many)
+
+        return (data, res) if return_response else data
+
+    def _get_mfa_code(self):
+        get_otp_proc = subprocess.run(["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
+                                      capture_output=True,
+                                      text=True)
+        output, error = get_otp_proc.stdout, get_otp_proc.stderr
+        self.logger.debug(f"get_otp_proc output: {output}")
+        self.logger.debug(f"get_otp_proc error: {error}")
+        result_json = json.loads(output)
+        self.logger.debug(result_json)
+        return result_json["results"][0]["code"]
+
+    def _get_oauth_payload(self):
+        oauth_payload = {
+            "client_id":                        CLIENT_ID,
+            "create_read_only_secondary_token": True,
+            "device_token":                     self.device_token,
+            "expires_in":                       EXPIRATION_TIME,
+            "grant_type":                       "password",
+            "password":                         self.password,
+            "request_id":                       self._generate_request_id(),
+            "scope":                            "internal",
+            "token_request_path":               "/login",
+            "username":                         self.username
+        }
+        self.logger.debug(oauth_payload)
+        return oauth_payload
+
+    def _login_oauth2(self) -> None:
+        """Create a new oauth2 token.
+
+        Raises:
+            AuthenticationError: If the login credentials are not set, if a challenge
+                wasn't accepted, or if a mfa code is not accepted.
+
+        """
+        self.logger.debug("_login_oauth2!")
+        self.session.headers.pop("Authorization", None)
+        self.logger.debug("_login_oauth2 Authorization popped!")
+        oauth = self.oauth
+        if not (oauth and oauth.is_valid):
+
+            oauth_payload = self._get_oauth_payload()
+            self.logger.debug(f"_login_oauth2 oauth_payload generated: {oauth_payload}")
+            workflow_id = self._mfa_oauth2(oauth_payload)
+            self.logger.debug(f"_login_oauth2 workflow_id generated: {workflow_id}")
+            oauth = self._mfa_login_workflow(workflow_id, oauth_payload)
+
+            if hasattr(oauth, "error"):
+                msg = f"{oauth.error}"
+            elif hasattr(oauth, "detail"):
+                msg = f"{oauth.detail}"
+            else:
+                msg = "Unknown login error"
+            raise AuthenticationError(msg)
+        else:
+            self._configure_manager(oauth)
+
+    def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth | None:
+        machine_id = self._user_machine_request(workflow_id)
+        challenge_id = self._user_view_get(machine_id)
+
+        if self.mfa != "":
+            mfa_code = pyotp.TOTP(self.mfa).now()
+        else:
+            mfa_code = self._get_mfa_code()
+
+        if self._challenge_response(challenge_id, mfa_code) and self._user_view_post(machine_id):
+            return self._mfa_oauth2(oauth_payload, OAuthSchema())
+
+    def _mfa_oauth2(self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3) -> str | OAuth:
         """Mfa auth flow.
 
          For people with 2fa.
@@ -385,73 +373,99 @@ class SessionManager(BaseModel):
                 number of attempts.
 
         """
-        if self.mfa != "":
-            mfa_code = pyotp.TOTP(self.mfa).now()
-        else:
-            mfa_code = input("Input mfa code: ")
-        oauth_payload["mfa_code"] = mfa_code
+        self.logger.debug("_mfa_oauth2!")
         oauth, res = self.post(
             urls.OAUTH,
             data=oauth_payload,
             raise_errors=False,
             auto_login=False,
             return_response=True,
-            schema=OAuthSchema(),
+            schema=schema,
         )
+        self.logger.debug("_mfa_oauth2 posted request!")
         attempts -= 1
-        if (res.status_code != requests.codes.ok) and (attempts > 0):
-            print("Invalid mfa code")
-            return self._mfa_oauth2(oauth_payload, attempts)
+        self.logger.debug(f"_mfa_oauth2 status_code: {res.status_code}")
+        self.logger.debug(f"_mfa_oauth2 oauth: {oauth}")
+        self.logger.debug(f"_mfa_oauth2 oauth_payload json: {json.dumps(oauth_payload)}")
+        if res.status_code == 403:
+            workflow_id = oauth["verification_workflow"]["id"]
+            return workflow_id
+
+        if res.status_code != requests.codes.ok and attempts > 0:
+            self.logger.error("Invalid mfa code")
+            return self._mfa_oauth2(oauth_payload, schema, attempts)
         elif res.status_code == requests.codes.ok:
             # TODO: Write mypy issue on why this needs to be casted?
             return cast(OAuth, oauth)
         else:
             raise AuthenticationError("Too many incorrect mfa attempts")
 
-    def _login_oauth2(self) -> None:
-        """Create a new oauth2 token.
+    def post(
+            self,
+            url: Union[str, URL],
+            data: Optional[JSON] = None,
+            headers: Optional[CaseInsensitiveDictType] = None,
+            raise_errors: bool = True,
+            return_response: bool = False,
+            auto_login: bool = True,
+            schema: Optional[Schema] = None,
+            many: bool = False,
+    ) -> Any:
+        """Run a wrapped session HTTP POST request.
+
+        Note:
+            This method automatically prompts the user to log in if not already logged
+            in.
+
+        Args:
+            url: The url to post to.
+            data: The payload to POST to the endpoint.
+            headers: A dict adding to and overriding the session headers.
+            return_response: Whether to return a `requests.Response` object or the
+                JSON response from the request.
+            raise_errors: Whether to raise errors on POST request.
+            auto_login: Whether to automatically login on restricted endpoint
+                errors.
+            schema: An instance of a `marshmallow.Schema` that represents the object
+                to build.
+            many: Whether to treat the output as a list of the passed schema.
+
+        Returns:
+            A JSON dictionary or a constructed object if a schema is passed. If \
+                `return_response` is set then a tuple of (response, data) is passed.
 
         Raises:
-            AuthenticationError: If the login credentials are not set, if a challenge
-                wasn't accepted, or if an mfa code is not accepted.
+            PyrhValueError: If the schema is not an instance of `Schema` and is instead
+                a class.
 
         """
-        self.session.headers.pop("Authorization", None)
-
-        oauth_payload = {
-            "password": self.password,
-            "username": self.username,
-            "grant_type": "password",
-            "client_id": CLIENT_ID,
-            "expires_in": EXPIRATION_TIME,
-            "scope": "internal",
-            "device_token": self.device_token,
-            "challenge_type": self.challenge_type,
-        }
-
-        oauth = self.post(
-            urls.OAUTH,
-            data=oauth_payload,
-            raise_errors=False,
-            auto_login=False,
-            schema=OAuthSchema(),
+        # Guard against common gotcha, passing schema class instead of instance.
+        self.logger.debug("_post!")
+        if isinstance(schema, type):
+            raise PyrhValueError("Passed Schema should be an instance not a class.")
+        self.logger.debug("_post posting request!")
+        res = self.session.post(
+            str(url),
+            json=data,
+            timeout=TIMEOUT,
+            headers=self.session.headers if headers is None else headers,
         )
+        self.logger.debug("_post got response!")
+        self.logger.debug(f"{str(url)}, {json.dumps(data)}, {self.session.headers}")
+        if (res.status_code == 401) and auto_login:
+            self.login(force_refresh=True)
+            res = self.session.post(
+                str(url),
+                json=data,
+                timeout=TIMEOUT,
+                headers=self.session.headers if headers is None else headers,
+            )
+        if raise_errors:
+            res.raise_for_status()
 
-        if oauth.is_challenge:
-            oauth = self._challenge_oauth2(oauth, oauth_payload)
-        elif oauth.is_mfa:
-            oauth = self._mfa_oauth2(oauth_payload)
+        data = res.json() if schema is None else schema.load(res.json(), many=many)
 
-        if not oauth.is_valid:
-            if hasattr(oauth, "error"):
-                msg = f"{oauth.error}"
-            elif hasattr(oauth, "detail"):
-                msg = f"{oauth.detail}"
-            else:
-                msg = "Unknown login error"
-            raise AuthenticationError(msg)
-        else:
-            self._configure_manager(oauth)
+        return (data, res) if return_response else data
 
     def _refresh_oauth2(self) -> None:
         """Refresh an oauth2 token.
@@ -463,18 +477,18 @@ class SessionManager(BaseModel):
         """
         if not self.oauth.is_valid:
             raise AuthenticationError("Cannot refresh login with unset refresh token")
-        relogin_payload = {
-            "grant_type": "refresh_token",
+        re_login_payload = {
+            "grant_type":    "refresh_token",
             "refresh_token": self.oauth.refresh_token,
-            "scope": "internal",
-            "client_id": CLIENT_ID,
-            "expires_in": EXPIRATION_TIME,
+            "scope":         "internal",
+            "client_id":     CLIENT_ID,
+            "expires_in":    EXPIRATION_TIME,
         }
         self.session.headers.pop("Authorization", None)
         try:
             oauth = self.post(
                 urls.OAUTH,
-                data=relogin_payload,
+                data=re_login_payload,
                 auto_login=False,
                 schema=OAuthSchema(),
             )
@@ -482,6 +496,102 @@ class SessionManager(BaseModel):
             raise AuthenticationError("Failed to refresh token")
 
         self._configure_manager(oauth)
+
+    def _user_machine_request(self, user_workflow_id):
+        payload = \
+            {
+                "device_id": self.device_token,
+                "flow":      "suv",
+                "input":
+                             {
+                                 "workflow_id": user_workflow_id
+                             }
+            }
+        self.session.headers["Content-Type"] = JSON_ENCODING
+        data, res = self.post(
+            urls.USER_MACHINE,
+            data=payload,
+            raise_errors=False,
+            auto_login=False,
+            return_response=True
+        )
+        if res.status_code == requests.codes.ok:
+            return data["id"]
+        else:
+            self.logger.info(res.status_code)
+            raise AuthenticationError("User Machine Error")
+
+    def _user_view_get(self, machine_id):
+        request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
+        data, res = self.get(
+            request_url,
+            raise_errors=False,
+            auto_login=False,
+            return_response=True
+        )
+        if res.status_code != requests.codes.ok:
+            self.logger.error("User View Error")
+        elif res.status_code == requests.codes.ok:
+            return data["context"]["sheriff_challenge"]["id"]
+        else:
+            raise AuthenticationError("User View Error")
+
+    def _user_view_post(self, machine_id):
+        request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
+        payload = {"sequence": 0, "user_input": {"status": "continue"}}
+        data, res = self.post(
+            request_url,
+            data=payload,
+            raise_errors=False,
+            auto_login=False,
+            return_response=True
+        )
+        if res.status_code != requests.codes.ok:
+            self.logger.error("User View Error")
+        elif res.status_code == requests.codes.ok and data["type_context"]["result"] == "workflow_status_approved":
+            return True
+        else:
+            raise AuthenticationError("User View Error")
+        return False
+
+    @property
+    def authenticated(self) -> bool:
+        """Check if the session is authenticated.
+
+        Returns:
+            Whether the current session is authenticated.
+        """
+        return "Authorization" in self.session.headers and not self.token_expired
+
+    @property
+    def logger(self):
+        return self.__logger
+
+    def login(self, force_refresh: bool = False) -> None:
+        """Login to the session.
+
+        This method logs the user in if they are not already and otherwise refreshes
+        the oauth token if it is expired.
+
+        Args:
+            force_refresh: If already logged in, whether to force an oauth token
+                refresh.
+
+        """
+        if "Authorization" not in self.session.headers:
+            self._login_oauth2()
+
+        elif self.oauth.is_valid and (self.token_expired or force_refresh):
+            self._refresh_oauth2()
+
+    @property
+    def login_set(self) -> bool:
+        """Check if login info is properly configured.
+
+        Returns:
+            Whether username and password are set.
+        """
+        return self.password is not None and self.username is not None
 
     def logout(self) -> None:
         """Logout from the session.
@@ -498,14 +608,14 @@ class SessionManager(BaseModel):
         except HTTPError:
             raise AuthenticationError("Could not log out")
 
-    def __repr__(self) -> str:
-        """Return the object as a string.
+    @property
+    def token_expired(self) -> bool:
+        """Check if the issued auth token has expired.
 
         Returns:
-            The string representation of the object.
-
+            True if expired otherwise False
         """
-        return f"SessionManager<{self.username}>"
+        return pendulum.now(tz="UTC") > pendulum.from_timestamp(self.expires_in)
 
 
 class SessionManagerSchema(BaseSchema):
@@ -518,7 +628,7 @@ class SessionManagerSchema(BaseSchema):
     password = fields.Str()
     challenge_type = fields.Str(validate=CHALLENGE_TYPE_VAL)
     oauth = fields.Nested(OAuthSchema)
-    expires_at = fields.AwareDateTime()
+    expires_in = fields.AwareDateTime()
     device_token = fields.Str()
     headers = fields.Dict()
     proxies = fields.Dict()
@@ -534,8 +644,8 @@ class SessionManagerSchema(BaseSchema):
         Returns:
             A configured instance of SessionManager.
         """
-        oauth = data.pop("oauth", None)
-        expires_at = data.pop("expires_at", None)
+        oauth: OAuth = data.pop("oauth", None)
+        expires_in = data.pop("expires_in", None)
         session_manager = self.__model__(**data)
 
         if oauth is not None and oauth.is_valid:
@@ -543,7 +653,7 @@ class SessionManagerSchema(BaseSchema):
             session_manager.session.headers.update(
                 {"Authorization": f"Bearer {session_manager.oauth.access_token}"}
             )
-        if expires_at:
-            session_manager.expires_at = expires_at
+        if expires_in:
+            session_manager.expires_in = expires_in
 
         return session_manager
