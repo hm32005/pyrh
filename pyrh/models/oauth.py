@@ -1,8 +1,9 @@
 """Oauth models."""
-
+import logging
 from datetime import datetime
 from typing import Any
 
+import pendulum
 import pytz
 from marshmallow import fields, validate
 
@@ -53,12 +54,20 @@ class OAuth(BaseModel):
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
+        self.__logger = logging.getLogger(__name__)
         if "access_token" in kwargs:
             self.access_token = kwargs["access_token"]
+            self.logger.info(f"OAuth init| access_token: {kwargs['access_token']}")
         if "refresh_token" in kwargs:
             self.refresh_token = kwargs["refresh_token"]
-        if "expires_in" in kwargs:
-            self.expires_in = kwargs["expires_in"]
+            self.logger.info(f"OAuth init| refresh_token {kwargs['refresh_token']}")
+        if "expires_at" in kwargs:
+            self.expires_in = pendulum.parse(kwargs["expires_at"]).diff(pendulum.now(tz="UTC")).in_seconds()
+            self.logger.info(f"OAuth init| expires_in: {self.expires_in} \t expires_at: {kwargs['expires_at']}")
+
+    @property
+    def logger(self):
+        return self.__logger
 
     @property
     def is_challenge(self) -> bool:

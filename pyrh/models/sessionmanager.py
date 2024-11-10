@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple, Union, cast
 from urllib.request import getproxies
 
 import certifi
-import pyotp as pyotp
+import pyotp
 import requests
 from httplib2 import Response
 from marshmallow import Schema, fields, post_load
@@ -73,7 +73,7 @@ class SessionManager(BaseModel):
 
     Attributes:
         session: A requests session instance
-        expires_in: The time the oauth token will expire at, default is 1970-01-01 00:00:00
+        expires_at: The time the oauth token will expire at, default is 1970-01-01 00:00:00
         device_token: A random guid representing the current device
 
     """
@@ -100,12 +100,12 @@ class SessionManager(BaseModel):
         self.__logger.info("Proxies done!")
         self.session.verify = certifi.where()
         self.__logger.info("certifi done!")
-        self.expires_in = pendulum.datetime(1970, 1, 1, tz='UTC').int_timestamp  # some time in the past
-        self.__logger.info("expires_in done!")
+        self.expires_at = pendulum.datetime(1970, 1, 1, tz='UTC')  # some time in the past
+        self.__logger.info("expires_at done!")
         self.username: str = username
-        self.__logger.debug("username done!")
+        self.__logger.info("username done!")
         self.password: str = password
-        self.__logger.debug("password done!")
+        self.__logger.info("password done!")
         if challenge_type not in ["email", "sms"]:
             raise ValueError("challenge_type must be email or sms")
         self.challenge_type: str = challenge_type
@@ -116,7 +116,7 @@ class SessionManager(BaseModel):
         self.__logger.info("oauth done!")
 
         super().__init__(**kwargs)
-        self.__logger.debug("super() done!")
+        self.__logger.info("super() done!")
 
     def __repr__(self) -> str:
         """Return the object as a string.
@@ -215,7 +215,7 @@ class SessionManager(BaseModel):
 
         """
         self.oauth = oauth
-        self.expires_in = self.oauth.expires_in
+        self.expires_at: pendulum.datetime = pendulum.now(tz="UTC").add(seconds=self.oauth.expires_in)
         self.session.headers.update(
             {"Authorization": f"Bearer {self.oauth.access_token}"}
         )
@@ -292,10 +292,10 @@ class SessionManager(BaseModel):
                                       capture_output=True,
                                       text=True)
         output, error = get_otp_proc.stdout, get_otp_proc.stderr
-        self.logger.debug(f"get_otp_proc output: {output}")
-        self.logger.debug(f"get_otp_proc error: {error}")
+        self.logger.info(f"get_otp_proc output: {output}")
+        self.logger.info(f"get_otp_proc error: {error}")
         result_json = json.loads(output)
-        self.logger.debug(result_json)
+        self.logger.info(result_json)
         return result_json["results"][0]["code"]
 
     def _get_oauth_payload(self):
@@ -311,7 +311,7 @@ class SessionManager(BaseModel):
             "token_request_path":               "/login",
             "username":                         self.username
         }
-        self.logger.debug(oauth_payload)
+        self.logger.info(oauth_payload)
         return oauth_payload
 
     def _login_oauth2(self) -> None:
@@ -322,18 +322,16 @@ class SessionManager(BaseModel):
                 wasn't accepted, or if a mfa code is not accepted.
 
         """
-        self.logger.debug("_login_oauth2!")
+        self.logger.info("_login_oauth2!")
         self.session.headers.pop("Authorization", None)
-        self.logger.debug("_login_oauth2 Authorization popped!")
-        oauth = self.oauth
-        if not (oauth and oauth.is_valid):
+        self.logger.info("_login_oauth2 Authorization popped!")
+        oauth_payload = self._get_oauth_payload()
+        self.logger.info(f"_login_oauth2 oauth_payload generated: {oauth_payload}")
+        workflow_id = self._mfa_oauth2(oauth_payload)
+        self.logger.info(f"_login_oauth2 workflow_id generated: {workflow_id}")
+        oauth = self._mfa_login_workflow(workflow_id, oauth_payload)
 
-            oauth_payload = self._get_oauth_payload()
-            self.logger.debug(f"_login_oauth2 oauth_payload generated: {oauth_payload}")
-            workflow_id = self._mfa_oauth2(oauth_payload)
-            self.logger.debug(f"_login_oauth2 workflow_id generated: {workflow_id}")
-            oauth = self._mfa_login_workflow(workflow_id, oauth_payload)
-
+        if not oauth.is_valid:
             if hasattr(oauth, "error"):
                 msg = f"{oauth.error}"
             elif hasattr(oauth, "detail"):
@@ -373,7 +371,7 @@ class SessionManager(BaseModel):
                 number of attempts.
 
         """
-        self.logger.debug("_mfa_oauth2!")
+        self.logger.info("_mfa_oauth2!")
         oauth, res = self.post(
             urls.OAUTH,
             data=oauth_payload,
@@ -382,11 +380,14 @@ class SessionManager(BaseModel):
             return_response=True,
             schema=schema,
         )
-        self.logger.debug("_mfa_oauth2 posted request!")
+        self.logger.info("_mfa_oauth2 posted request!")
         attempts -= 1
-        self.logger.debug(f"_mfa_oauth2 status_code: {res.status_code}")
-        self.logger.debug(f"_mfa_oauth2 oauth: {oauth}")
-        self.logger.debug(f"_mfa_oauth2 oauth_payload json: {json.dumps(oauth_payload)}")
+        self.logger.info(f"_mfa_oauth2 status_code: {res.status_code}")
+        if isinstance(oauth, dict):
+            self.logger.info(f"_mfa_oauth2 oauth keys: {oauth.keys()}")
+        else:
+            self.logger.info(f"_mfa_oauth2 oauth dict: {oauth.__dict__}")
+        self.logger.info(f"_mfa_oauth2 oauth_payload json: {json.dumps(oauth_payload)}")
         if res.status_code == 403:
             workflow_id = oauth["verification_workflow"]["id"]
             return workflow_id
@@ -440,18 +441,18 @@ class SessionManager(BaseModel):
 
         """
         # Guard against common gotcha, passing schema class instead of instance.
-        self.logger.debug("_post!")
+        self.logger.info("_post!")
         if isinstance(schema, type):
             raise PyrhValueError("Passed Schema should be an instance not a class.")
-        self.logger.debug("_post posting request!")
+        self.logger.info("_post posting request!")
         res = self.session.post(
             str(url),
             json=data,
             timeout=TIMEOUT,
             headers=self.session.headers if headers is None else headers,
         )
-        self.logger.debug("_post got response!")
-        self.logger.debug(f"{str(url)}, {json.dumps(data)}, {self.session.headers}")
+        self.logger.info("_post got response!")
+        self.logger.info(f"{str(url)}, {json.dumps(data)}, {self.session.headers}")
         if (res.status_code == 401) and auto_login:
             self.login(force_refresh=True)
             res = self.session.post(
@@ -579,9 +580,16 @@ class SessionManager(BaseModel):
 
         """
         if "Authorization" not in self.session.headers:
-            self._login_oauth2()
+            # If login credentials are provided
+            if self.login_set:
+                self._login_oauth2()
+            # Relogin using existing valid token
+            elif self.oauth and self.oauth.is_valid:
+                self._configure_manager(self.oauth)
+            else:
+                raise AuthenticationError("Valid auth token not sent and login credentials missing")
 
-        elif self.oauth.is_valid and (self.token_expired or force_refresh):
+        elif self.oauth.is_valid and (self.oauth.token_expired or force_refresh):
             self._refresh_oauth2()
 
     @property
@@ -615,7 +623,7 @@ class SessionManager(BaseModel):
         Returns:
             True if expired otherwise False
         """
-        return pendulum.now(tz="UTC") > pendulum.from_timestamp(self.expires_in)
+        return pendulum.now(tz="UTC") > self.expires_at
 
 
 class SessionManagerSchema(BaseSchema):
@@ -628,7 +636,7 @@ class SessionManagerSchema(BaseSchema):
     password = fields.Str()
     challenge_type = fields.Str(validate=CHALLENGE_TYPE_VAL)
     oauth = fields.Nested(OAuthSchema)
-    expires_in = fields.AwareDateTime()
+    expires_at = fields.AwareDateTime()
     device_token = fields.Str()
     headers = fields.Dict()
     proxies = fields.Dict()
@@ -645,7 +653,7 @@ class SessionManagerSchema(BaseSchema):
             A configured instance of SessionManager.
         """
         oauth: OAuth = data.pop("oauth", None)
-        expires_in = data.pop("expires_in", None)
+        expires_at = data.pop("expires_at", None)
         session_manager = self.__model__(**data)
 
         if oauth is not None and oauth.is_valid:
@@ -653,7 +661,7 @@ class SessionManagerSchema(BaseSchema):
             session_manager.session.headers.update(
                 {"Authorization": f"Bearer {session_manager.oauth.access_token}"}
             )
-        if expires_in:
-            session_manager.expires_in = expires_in
+        if expires_at:
+            session_manager.expires_at = expires_at
 
         return session_manager
