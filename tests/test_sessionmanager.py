@@ -1,3 +1,4 @@
+# coding=utf-8
 """Test session manager"""
 
 from unittest import mock

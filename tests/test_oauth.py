@@ -1,3 +1,4 @@
+# coding=utf-8
 """Test the oauth classes."""
 
 from freezegun import freeze_time
@@ -5,7 +6,6 @@ from freezegun import freeze_time
 
 @freeze_time("2020-01-01")
 def test_challenge_can_retry():
-    from copy import copy
     from datetime import datetime, timedelta
 
     import pytz

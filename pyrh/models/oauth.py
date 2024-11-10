@@ -1,3 +1,4 @@
+# coding=utf-8
 """Oauth models."""
 import logging
 from datetime import datetime

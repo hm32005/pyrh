@@ -1,3 +1,4 @@
+# coding=utf-8
 """Base Model."""
 from collections.abc import MutableSequence
 from types import SimpleNamespace

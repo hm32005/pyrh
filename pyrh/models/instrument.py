@@ -1,3 +1,4 @@
+# coding=utf-8
 """Stock Instruments in Robinhood."""
 
 from typing import Iterable, Optional, cast

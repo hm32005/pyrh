@@ -1,3 +1,4 @@
+# coding=utf-8
 # Constants
 CLIENT_ID: str = "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS"
 """ Robinhood client id."""

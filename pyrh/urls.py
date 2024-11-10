@@ -1,3 +1,4 @@
+# coding=utf-8
 """Define Robinhood endpoints."""
 
 from typing import Optional

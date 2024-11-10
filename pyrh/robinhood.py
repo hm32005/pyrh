@@ -1,3 +1,4 @@
+# coding=utf-8
 """robinhood.py: a collection of utilities for working with Robinhood's Private API."""
 
 from enum import Enum

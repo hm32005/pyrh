@@ -1,3 +1,4 @@
+# coding=utf-8
 """pyrh models and schemas."""
 
 from .instrument import (

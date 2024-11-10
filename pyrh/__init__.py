@@ -1,6 +1,6 @@
+# coding=utf-8
 """Export pyrh sub classes."""
 
-from . import exceptions
 from .cache import dump_session, load_session
 from .constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
 from .robinhood import Robinhood

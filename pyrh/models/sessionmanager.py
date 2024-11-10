@@ -1,3 +1,4 @@
+# coding=utf-8
 """Manage Robinhood Sessions."""
 import json
 import logging
@@ -652,7 +653,7 @@ class SessionManagerSchema(BaseSchema):
         Returns:
             A configured instance of SessionManager.
         """
-        oauth: OAuth = data.pop("oauth", None)
+        oauth: OAuth | None = data.pop("oauth", None)
         expires_at = data.pop("expires_at", None)
         session_manager = self.__model__(**data)
 
