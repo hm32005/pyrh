@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, Union, cast
 
 from pyrh.exceptions import InvalidCacheFile
-from pyrh.robinhood import Robinhood, RobinhoodSchema
+from pyrh import Robinhood, RobinhoodSchema
 
 CACHE_ROOT: Path = Path("~/.robinhood").expanduser()
 """The root directory where cache and config files are stores.

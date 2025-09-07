@@ -63,8 +63,11 @@ class OAuth(BaseModel):
             self.refresh_token = kwargs["refresh_token"]
             self.logger.info(f"OAuth init| refresh_token {kwargs['refresh_token']}")
         if "expires_at" in kwargs:
-            self.expires_in = pendulum.parse(kwargs["expires_at"]).diff(pendulum.now(tz="UTC")).in_seconds()
-            self.logger.info(f"OAuth init| expires_in: {self.expires_in} \t expires_at: {kwargs['expires_at']}")
+            utc_now = pendulum.now(tz="UTC")
+            self.logger.info(f"OAuth init| utc_now: {utc_now}")
+            self.logger.info(f"OAuth init| expires_at: {kwargs["expires_at"]}")
+            self.expires_in = utc_now.diff(kwargs["expires_at"], abs=False).in_seconds()
+            self.logger.info(f"OAuth init| expires_in: {self.expires_in}")
 
     @property
     def logger(self):

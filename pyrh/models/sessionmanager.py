@@ -11,21 +11,20 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple, Union, cast
 from urllib.request import getproxies
 
 import certifi
+import pendulum
 import pyotp
 import requests
 from httplib2 import Response
 from marshmallow import Schema, fields, post_load
-from requests.exceptions import HTTPError
-from requests.structures import CaseInsensitiveDict
-import pendulum
-from yarl import URL
-
 from pyrh import urls
 from pyrh.constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
 from pyrh.exceptions import AuthenticationError, PyrhValueError
 from pyrh.models.base import BaseModel, BaseSchema, JSON
 from pyrh.models.oauth import (CHALLENGE_TYPE_VAL, OAuth, OAuthSchema)
-from pyrh.util import robinhood_headers, JSON_ENCODING
+from pyrh.util import JSON_ENCODING, robinhood_headers
+from requests.exceptions import HTTPError
+from requests.structures import CaseInsensitiveDict
+from yarl import URL
 
 parent_dir = Path(__file__).parent
 # log_conf_path = os.path.join(parent_dir, os.pardir, os.pardir, os.pardir, "conf", "logging.conf")
@@ -101,8 +100,7 @@ class SessionManager(BaseModel):
         self.__logger.info("Proxies done!")
         self.session.verify = certifi.where()
         self.__logger.info("certifi done!")
-        self.expires_at = pendulum.datetime(1970, 1, 1, tz='UTC')  # some time in the past
-        self.__logger.info("expires_at done!")
+
         self.username: str = username
         self.__logger.info("username done!")
         self.password: str = password
@@ -115,6 +113,15 @@ class SessionManager(BaseModel):
         self.__logger.info("device_token done!")
         self.oauth: OAuth = kwargs.pop("oauth", OAuth())
         self.__logger.info("oauth done!")
+
+        epoch_time = pendulum.datetime(1970, 1,
+                                       1,
+                                       tz='UTC')
+
+        self.expires_at: pendulum.datetime = pendulum.now("UTC").add(seconds=self.oauth.expires_in) if hasattr(self.oauth, "access_token") and self.oauth.expires_in else epoch_time
+
+        self.__logger.info("expires_at done!")
+        self.__logger.info(f"type(self.expires_at): {type(self.expires_at)}")
 
         super().__init__(**kwargs)
         self.__logger.info("super() done!")
@@ -477,6 +484,7 @@ class SessionManager(BaseModel):
                 when trying to refresh a token.
 
         """
+        self.logger.info("Refreshing token")
         if not self.oauth.is_valid:
             raise AuthenticationError("Cannot refresh login with unset refresh token")
         re_login_payload = {
@@ -580,19 +588,23 @@ class SessionManager(BaseModel):
                 refresh.
 
         """
+        self.logger.info(
+            f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}")
         if "Authorization" not in self.session.headers:
             # If login credentials are provided
             if self.login_set:
                 self._login_oauth2()
             # Relogin using existing valid token
             elif self.oauth and self.oauth.is_valid:
-                self._configure_manager(self.oauth)
+                #     if (self.token_expired or force_refresh):
+                    # FIXME: Need to call the refresh workflow here
+                    # self._refresh_oauth2()
+                    # self._login_oauth2()
+                pass
             else:
                 raise AuthenticationError("Valid auth token not sent and login credentials missing")
 
-        elif self.oauth.is_valid and (self.oauth.token_expired or force_refresh):
-            self._refresh_oauth2()
-
+            self._configure_manager(self.oauth)
     @property
     def login_set(self) -> bool:
         """Check if login info is properly configured.
@@ -624,6 +636,8 @@ class SessionManager(BaseModel):
         Returns:
             True if expired otherwise False
         """
+        self.logger.info(f"token_expired| self.expires_at: {self.expires_at}")
+        self.logger.info(f"token_expired| type(self.expires_at): {type(self.expires_at)}")
         return pendulum.now(tz="UTC") > self.expires_at
 
 
@@ -637,7 +651,7 @@ class SessionManagerSchema(BaseSchema):
     password = fields.Str()
     challenge_type = fields.Str(validate=CHALLENGE_TYPE_VAL)
     oauth = fields.Nested(OAuthSchema)
-    expires_at = fields.AwareDateTime()
+    expires_at = fields.DateTime()
     device_token = fields.Str()
     headers = fields.Dict()
     proxies = fields.Dict()

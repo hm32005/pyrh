@@ -493,6 +493,10 @@ class Robinhood(InstrumentManager, SessionManager):
             instruments.append(self.get_url(position["instrument"]))
         return instruments
 
+    def get_symbol_from_instrument_url(self, url):
+        instrument = self.get_url(url)
+        return instrument["symbol"]
+
     ###########################################################################
     #                           GET OPTIONS INFO                              #
     ###########################################################################
@@ -604,10 +608,9 @@ class Robinhood(InstrumentManager, SessionManager):
         # Check for validity of symbol
         try:
             data = self.get_url(url)
+            return data
         except requests.exceptions.HTTPError:
             raise InvalidTickerSymbol()
-
-        return data
 
     ###########################################################################
     #                           PORTFOLIOS DATA
