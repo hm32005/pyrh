@@ -296,15 +296,23 @@ class SessionManager(BaseModel):
         return (data, res) if return_response else data
 
     def _get_mfa_code(self):
-        get_otp_proc = subprocess.run(["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
-                                      capture_output=True,
-                                      text=True)
-        output, error = get_otp_proc.stdout, get_otp_proc.stderr
-        self.logger.info(f"get_otp_proc output: {output}")
-        self.logger.info(f"get_otp_proc error: {error}")
-        result_json = json.loads(output)
-        self.logger.info(result_json)
-        return result_json["results"][0]["code"]
+        # Try APW first
+        try:
+            get_otp_proc = subprocess.run(
+                ["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if get_otp_proc.returncode == 0:
+                result_json = json.loads(get_otp_proc.stdout)
+                return result_json["results"][0]["code"]
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            self.logger.warning(f"APW OTP failed: {e}")
+
+        # Fall back to manual input
+        self.logger.info("Requesting manual MFA code entry")
+        return input("Enter Robinhood MFA code: ").strip()
 
     def _get_oauth_payload(self):
         oauth_payload = {
@@ -319,7 +327,7 @@ class SessionManager(BaseModel):
             "token_request_path":               "/login",
             "username":                         self.username
         }
-        self.logger.info(oauth_payload)
+        self.logger.debug("OAuth payload generated for user=%s", self.username[:3] + "***")
         return oauth_payload
 
     def _login_oauth2(self) -> None:
@@ -334,7 +342,7 @@ class SessionManager(BaseModel):
         self.session.headers.pop("Authorization", None)
         self.logger.info("_login_oauth2 Authorization popped!")
         oauth_payload = self._get_oauth_payload()
-        self.logger.info(f"_login_oauth2 oauth_payload generated: {oauth_payload}")
+        self.logger.debug("_login_oauth2 oauth_payload generated (redacted)")
         workflow_id = self._mfa_oauth2(oauth_payload)
         self.logger.info(f"_login_oauth2 workflow_id generated: {workflow_id}")
         oauth = self._mfa_login_workflow(workflow_id, oauth_payload)
@@ -352,14 +360,23 @@ class SessionManager(BaseModel):
 
     def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth | None:
         machine_id = self._user_machine_request(workflow_id)
-        challenge_id = self._user_view_get(machine_id)
+        challenge_id, challenge_type = self._user_view_get(machine_id)
+        self.logger.info(f"_mfa_login_workflow| challenge_type: {challenge_type}, challenge_id: {challenge_id}")
 
-        if self.mfa != "":
-            mfa_code = pyotp.TOTP(self.mfa).now()
+        if challenge_type == "prompt":
+            self.logger.info("Device approval required — waiting for user to approve on mobile app")
+            self._poll_prompt_approval(challenge_id)
         else:
-            mfa_code = self._get_mfa_code()
+            # SMS / TOTP fallback
+            if self.mfa != "":
+                mfa_code = pyotp.TOTP(self.mfa).now()
+            else:
+                mfa_code = self._get_mfa_code()
 
-        if self._challenge_response(challenge_id, mfa_code) and self._user_view_post(machine_id):
+            if not self._challenge_response(challenge_id, mfa_code):
+                raise AuthenticationError("Challenge response was not validated")
+
+        if self._user_view_post(machine_id):
             return self._mfa_oauth2(oauth_payload, OAuthSchema())
 
     def _mfa_oauth2(self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3) -> str | OAuth:
@@ -395,7 +412,7 @@ class SessionManager(BaseModel):
             self.logger.info(f"_mfa_oauth2 oauth keys: {oauth.keys()}")
         else:
             self.logger.info(f"_mfa_oauth2 oauth dict: {oauth.__dict__}")
-        self.logger.info(f"_mfa_oauth2 oauth_payload json: {json.dumps(oauth_payload)}")
+        self.logger.debug("_mfa_oauth2 status=%s", res.status_code)
         if res.status_code == 403:
             workflow_id = oauth["verification_workflow"]["id"]
             return workflow_id
@@ -459,8 +476,7 @@ class SessionManager(BaseModel):
             timeout=TIMEOUT,
             headers=self.session.headers if headers is None else headers,
         )
-        self.logger.info("_post got response!")
-        self.logger.info(f"{str(url)}, {json.dumps(data)}, {self.session.headers}")
+        self.logger.debug("POST %s status=%s", str(url), res.status_code)
         if (res.status_code == 401) and auto_login:
             self.login(force_refresh=True)
             res = self.session.post(
@@ -477,7 +493,7 @@ class SessionManager(BaseModel):
         return (data, res) if return_response else data
 
     def _refresh_oauth2(self) -> None:
-        """Refresh an oauth2 token.
+        """Refresh the OAuth token using the stored refresh_token.
 
         Raises:
             AuthenticationError: If refresh_token is missing or if there is an error
@@ -485,27 +501,32 @@ class SessionManager(BaseModel):
 
         """
         self.logger.info("Refreshing token")
-        if not self.oauth.is_valid:
-            raise AuthenticationError("Cannot refresh login with unset refresh token")
-        re_login_payload = {
+        if not self.oauth or not self.oauth.is_valid or not hasattr(self.oauth, "refresh_token"):
+            raise AuthenticationError("No refresh token available")
+
+        refresh_payload = {
+            "client_id":     CLIENT_ID,
             "grant_type":    "refresh_token",
             "refresh_token": self.oauth.refresh_token,
+            "device_token":  self.device_token,
             "scope":         "internal",
-            "client_id":     CLIENT_ID,
-            "expires_in":    EXPIRATION_TIME,
         }
-        self.session.headers.pop("Authorization", None)
-        try:
-            oauth = self.post(
-                urls.OAUTH,
-                data=re_login_payload,
-                auto_login=False,
-                schema=OAuthSchema(),
-            )
-        except HTTPError:
-            raise AuthenticationError("Failed to refresh token")
 
-        self._configure_manager(oauth)
+        oauth, res = self.post(
+            urls.OAUTH,
+            data=refresh_payload,
+            raise_errors=False,
+            auto_login=False,
+            return_response=True,
+            schema=OAuthSchema(),
+        )
+
+        if res.status_code == requests.codes.ok and hasattr(oauth, "is_valid") and oauth.is_valid:
+            self._configure_manager(oauth)
+            self.logger.info("Token refreshed successfully")
+        else:
+            self.logger.warning("Token refresh failed, falling back to full login")
+            raise AuthenticationError("Failed to refresh token")
 
     def _user_machine_request(self, user_workflow_id):
         payload = \
@@ -531,6 +552,46 @@ class SessionManager(BaseModel):
             self.logger.info(res.status_code)
             raise AuthenticationError("User Machine Error")
 
+    def _poll_prompt_approval(self, challenge_id, timeout=120, interval=5):
+        """Poll /push/{challenge_id}/get_prompts_status/ for device approval.
+
+        Args:
+            challenge_id: The challenge UUID returned by the user_view endpoint.
+            timeout: Maximum seconds to wait before raising AuthenticationError.
+            interval: Seconds between each poll attempt.
+
+        Returns:
+            True when the challenge_status is ``"validated"``.
+
+        Raises:
+            AuthenticationError: If the challenge is denied, expired, or times out.
+        """
+        import time
+        prompt_url = str(urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/")
+        elapsed = 0
+        while elapsed < timeout:
+            time.sleep(interval)
+            elapsed += interval
+            try:
+                data, res = self.get(
+                    prompt_url,
+                    raise_errors=False,
+                    auto_login=False,
+                    return_response=True,
+                )
+                if res.status_code == 200:
+                    status = data.get("challenge_status", "unknown")
+                    self.logger.info(f"Prompt status: {status} ({elapsed}s)")
+                    if status == "validated":
+                        return True
+                    if status in ("denied", "expired"):
+                        raise AuthenticationError(f"Device approval {status}")
+            except AuthenticationError:
+                raise
+            except Exception as e:
+                self.logger.error(f"Prompt poll error: {e}")
+        raise AuthenticationError(f"Device approval timed out after {timeout}s")
+
     def _user_view_get(self, machine_id):
         request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
         data, res = self.get(
@@ -541,10 +602,11 @@ class SessionManager(BaseModel):
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("User View Error")
-        elif res.status_code == requests.codes.ok:
-            return data["context"]["sheriff_challenge"]["id"]
-        else:
             raise AuthenticationError("User View Error")
+        sheriff_challenge = data["context"]["sheriff_challenge"]
+        challenge_id = sheriff_challenge["id"]
+        challenge_type = sheriff_challenge.get("type", "sms")
+        return challenge_id, challenge_type
 
     def _user_view_post(self, machine_id):
         request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
@@ -591,20 +653,33 @@ class SessionManager(BaseModel):
         self.logger.info(
             f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}")
         if "Authorization" not in self.session.headers:
-            # If login credentials are provided
-            if self.login_set:
+            # No active Authorization header — need to establish a session
+            if self.oauth and self.oauth.is_valid:
+                # We have a token already; try refresh first
+                try:
+                    self._refresh_oauth2()
+                except AuthenticationError:
+                    if self.login_set:
+                        self._login_oauth2()
+                    else:
+                        raise
+                return
+            elif self.login_set:
                 self._login_oauth2()
-            # Relogin using existing valid token
-            elif self.oauth and self.oauth.is_valid:
-                #     if (self.token_expired or force_refresh):
-                    # FIXME: Need to call the refresh workflow here
-                    # self._refresh_oauth2()
-                    # self._login_oauth2()
-                pass
             else:
                 raise AuthenticationError("Valid auth token not sent and login credentials missing")
-
-            self._configure_manager(self.oauth)
+        elif force_refresh or self.token_expired:
+            # Already have Authorization header but token needs refreshing
+            if self.oauth and self.oauth.is_valid:
+                try:
+                    self._refresh_oauth2()
+                    return
+                except AuthenticationError:
+                    pass
+            if self.login_set:
+                self._login_oauth2()
+            else:
+                raise AuthenticationError("Cannot refresh: no refresh token and no login credentials")
     @property
     def login_set(self) -> bool:
         """Check if login info is properly configured.
