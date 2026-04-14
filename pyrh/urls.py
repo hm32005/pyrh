@@ -52,6 +52,7 @@ PASSWORD_RESET: URL = API_BASE / "password_reset/request/"  # not implemented
 USER_MACHINE: URL = API_BASE / "pathfinder/user_machine/"
 INQUIRIES: URL = API_BASE / "pathfinder/inquiries"
 CHALLENGE: URL = API_BASE / "challenge"
+PUSH_PROMPT_STATUS: URL = API_BASE / "push"
 
 def challenge(challenge_id: str) -> URL:
     """Build challenge response url.
