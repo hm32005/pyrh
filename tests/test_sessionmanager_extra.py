@@ -360,6 +360,87 @@ def test_post_with_custom_headers(sm):
     assert adapter.last_request.headers["X-Something"] == "yes"
 
 
+def test_get_401_retry_uses_refreshed_bearer(sm):
+    """Regression: after a 401, ``get()`` calls ``login(force_refresh=True)``
+    and retries. The retry MUST use the new Authorization header. If
+    ``login`` silently succeeded without rotating the bearer (e.g. a
+    no-op fallback path), replaying the stale bearer produces another 401
+    loop. We now verify the header changed and the retry carries the new
+    value — or raise if it didn't change.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #8.
+    """
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("mock", adapter)
+    # Sequence: first GET 401, then 200 after refresh.
+    adapter.register_uri(
+        "GET",
+        MOCK_URL,
+        [
+            {"text": '{"detail": "expired"}', "status_code": 401},
+            {"text": '{"ok": true}', "status_code": 200},
+        ],
+    )
+
+    sm.session.headers["Authorization"] = "Bearer OLD"
+
+    def _fake_refresh(force_refresh=False):
+        sm.session.headers["Authorization"] = "Bearer NEW"
+
+    with mock.patch.object(sm, "login", side_effect=_fake_refresh) as mocked:
+        body = sm.get(MOCK_URL, auto_login=True)
+
+    assert body == {"ok": True}
+    mocked.assert_called_once_with(force_refresh=True)
+    # Second (retry) request must have carried the NEW bearer.
+    assert adapter.last_request.headers["Authorization"] == "Bearer NEW"
+
+
+def test_get_401_retry_raises_if_bearer_not_rotated(sm):
+    """Regression: if ``login(force_refresh=True)`` returns without actually
+    rotating the bearer, retrying would replay the stale token and loop
+    forever on 401. Surface the inconsistency instead."""
+    from pyrh.exceptions import AuthenticationError
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("mock", adapter)
+    adapter.register_uri(
+        "GET", MOCK_URL, text='{"detail": "expired"}', status_code=401
+    )
+
+    sm.session.headers["Authorization"] = "Bearer STALE"
+
+    with mock.patch.object(sm, "login", return_value=None):  # no-op refresh
+        with pytest.raises(
+            AuthenticationError,
+            match="Authorization header was not updated",
+        ):
+            sm.get(MOCK_URL, auto_login=True)
+
+
+def test_post_401_retry_raises_if_bearer_not_rotated(sm):
+    """Same contract as `test_get_401_retry_raises_if_bearer_not_rotated`
+    but on the POST path — the duplicated 401 retry block must surface the
+    inconsistency instead of replaying a stale bearer."""
+    from pyrh.exceptions import AuthenticationError
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("mock", adapter)
+    adapter.register_uri(
+        "POST", MOCK_URL, text='{"detail": "expired"}', status_code=401
+    )
+
+    sm.session.headers["Authorization"] = "Bearer STALE"
+
+    with mock.patch.object(sm, "login", return_value=None):
+        with pytest.raises(
+            AuthenticationError,
+            match="Authorization header was not updated",
+        ):
+            sm.post(MOCK_URL, data={}, auto_login=True)
+
+
 # ---------------------------------------------------------------------------
 # _user_machine_request / _user_view_get / _user_view_post
 # ---------------------------------------------------------------------------

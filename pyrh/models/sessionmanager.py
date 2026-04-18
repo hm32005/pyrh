@@ -299,6 +299,19 @@ class SessionManager(BaseModel):
     def _generate_request_id():
         return str(uuid.uuid4())
 
+    def _log_bearer_fingerprint(self, label: str, authorization: Optional[str]) -> None:
+        """Emit a short, non-reversible fingerprint of the Authorization
+        header at DEBUG so operators can diff pre- vs post-refresh bearers
+        without the raw token ever hitting logs.
+        """
+        if not authorization:
+            self.logger.debug("bearer_fingerprint %s=<absent>", label)
+            return
+        import hashlib
+
+        digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:8]
+        self.logger.debug("bearer_fingerprint %s=%s", label, digest)
+
     def get(
         self,
         url: Union[str, URL],
@@ -349,7 +362,19 @@ class SessionManager(BaseModel):
             headers=self.session.headers if headers is None else headers,
         )
         if res.status_code == 401 and auto_login:
+            old_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("pre-refresh", old_authorization)
             self.login(force_refresh=True)
+            new_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("post-refresh", new_authorization)
+            if new_authorization == old_authorization:
+                # Refresh claimed success but the Authorization header is
+                # unchanged — retrying would replay the same stale bearer and
+                # produce another 401. Surface the inconsistency instead of
+                # silently looping.
+                raise AuthenticationError(
+                    "Refresh succeeded but Authorization header was not updated"
+                )
             res = self.session.get(
                 str(url),
                 params=params,
@@ -597,7 +622,18 @@ class SessionManager(BaseModel):
         )
         self.logger.debug("POST %s status=%s", str(url), res.status_code)
         if (res.status_code == 401) and auto_login:
+            old_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("pre-refresh", old_authorization)
             self.login(force_refresh=True)
+            new_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("post-refresh", new_authorization)
+            if new_authorization == old_authorization:
+                # See matching note in `get()`: refresh claims success but
+                # bearer is unchanged → retrying loops forever on the stale
+                # token.
+                raise AuthenticationError(
+                    "Refresh succeeded but Authorization header was not updated"
+                )
             res = self.session.post(
                 str(url),
                 json=data,
