@@ -1069,11 +1069,34 @@ def test_poll_prompt_approval_generic_exception_propagates(_sleep, sm):
 
 
 @mock.patch("time.sleep", return_value=None)
-def test_poll_prompt_approval_non_200_continues_until_timeout(_sleep, sm):
-    """Non-200 responses don't short-circuit; they let the loop time out."""
+def test_poll_prompt_approval_counter_increments_on_5xx(_sleep, sm):
+    """DoS-proofing (finding #9): a persistent 5xx from the poll endpoint no
+    longer resets the consecutive-failure counter. Three 5xx in a row raises
+    AuthenticationError with the status in the message instead of silently
+    looping to timeout.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #9.
+    """
     from pyrh.exceptions import AuthenticationError
 
-    with mock.patch.object(sm, "get", return_value=({}, _mock_response(500))):
+    with mock.patch.object(sm, "get", return_value=({}, _mock_response(503))):
+        with pytest.raises(
+            AuthenticationError,
+            match="3 consecutive server errors",
+        ) as exc_info:
+            sm._poll_prompt_approval("c-1", timeout=30, interval=5)
+    assert "status=503" in str(exc_info.value)
+
+
+@mock.patch("time.sleep", return_value=None)
+def test_poll_prompt_approval_non_200_below_500_continues_until_timeout(_sleep, sm):
+    """Non-500 non-200 (e.g. 429) responses still let the loop run to timeout —
+    only 5xx triggers the failure counter, consistent with transient-throttle
+    semantics upstream may retry cheaply."""
+    from pyrh.exceptions import AuthenticationError
+
+    with mock.patch.object(sm, "get", return_value=({}, _mock_response(429))):
         with pytest.raises(AuthenticationError, match="timed out"):
             sm._poll_prompt_approval("c-1", timeout=5, interval=5)
 
@@ -1084,19 +1107,22 @@ def test_poll_prompt_approval_request_exception_retries_then_raises(_sleep, sm):
     AuthenticationError with the original exception chained via __cause__.
 
     Regression for the previous broad `except Exception` that silently
-    converted every transport failure into a timeout.
+    converted every transport failure into a timeout. Additionally tightens
+    the assertion to `mock_get.call_count == 3` so the retry budget itself
+    is pinned (finding #11).
     """
     import requests
 
     from pyrh.exceptions import AuthenticationError
 
     connection_error = requests.ConnectionError("network is unreachable")
-    with mock.patch.object(sm, "get", side_effect=connection_error):
+    with mock.patch.object(sm, "get", side_effect=connection_error) as mock_get:
         with pytest.raises(AuthenticationError, match="3 consecutive") as exc_info:
             # 3 intervals @ 5s within a 15s timeout hits the threshold.
             sm._poll_prompt_approval("c-1", timeout=15, interval=5)
 
     assert exc_info.value.__cause__ is connection_error
+    assert mock_get.call_count == 3
 
 
 @mock.patch("time.sleep", return_value=None)

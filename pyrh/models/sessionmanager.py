@@ -789,8 +789,29 @@ class SessionManager(BaseModel):
                         f"Prompt polling failed after 3 consecutive errors: {e}"
                     ) from e
                 continue
-            # Reset the consecutive-failure counter on any non-raising request.
-            consecutive_failures = 0
+            # DoS-proofing: a persistent 5xx from the poll endpoint (no
+            # RequestException raised, so we reach here) should still count
+            # as a failure. Otherwise a timeout-never-raising upstream would
+            # let us loop for the full `timeout` window, wasting cycles and
+            # swallowing the real cause. Only reset the counter on a clean
+            # 200 with a known status value.
+            status_reset_ok = res.status_code == 200 and data.get(
+                "challenge_status"
+            ) in ("issued", "unknown")
+            if res.status_code >= 500:
+                consecutive_failures += 1
+                self.logger.error(
+                    "Prompt poll server error (%s/3): status=%s",
+                    consecutive_failures,
+                    res.status_code,
+                )
+                if consecutive_failures >= 3:
+                    raise AuthenticationError(
+                        f"Prompt polling failed after 3 consecutive "
+                        f"server errors (last status={res.status_code})"
+                    ) from None
+            elif status_reset_ok:
+                consecutive_failures = 0
             if res.status_code == 200:
                 status = data.get("challenge_status", "unknown")
                 self.logger.info(f"Prompt status: {status} ({elapsed}s)")
