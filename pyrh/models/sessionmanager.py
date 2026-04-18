@@ -57,6 +57,30 @@ def _truncate_body(res: Any, limit: int = 200) -> str:
     return text[:limit]
 
 
+def _is_permanent_refresh_failure(err: Exception) -> bool:
+    """Return True when a refresh-token failure is permanent.
+
+    Permanent failures (401 unauthorized, 403 forbidden, any 4xx from the
+    oauth endpoint) mean the refresh token was revoked or is otherwise
+    invalid — silently falling back to a password-grant login would mask the
+    root cause and show the user an unrelated MFA prompt.
+
+    Transient failures (5xx, network) are recoverable and the caller may
+    choose to fall back to an interactive login.
+
+    The classification uses the ``status_code`` attribute set on the
+    AuthenticationError by ``_refresh_oauth2`` — if absent (e.g. an
+    unrelated AuthenticationError such as "No refresh token available"),
+    the failure is treated as permanent by default so it is not silently
+    swallowed.
+    """
+    status = getattr(err, "status_code", None)
+    if status is None:
+        return True
+    # 4xx → permanent; 5xx → transient; anything else → treat as permanent.
+    return 400 <= int(status) < 500
+
+
 class SessionManager(BaseModel):
     """Manage connectivity with Robinhood API.
 
@@ -583,7 +607,15 @@ class SessionManager(BaseModel):
             self.logger.info("Token refreshed successfully")
         else:
             self.logger.warning("Token refresh failed, falling back to full login")
-            raise AuthenticationError("Failed to refresh token")
+            err = AuthenticationError(
+                f"Failed to refresh token: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
+            # Attach the HTTP status so callers (notably `login`) can classify
+            # the failure as permanent (401/403/4xx token revoked) vs
+            # transient (5xx / network) without re-parsing the message.
+            err.status_code = res.status_code
+            raise err
 
     def _user_machine_request(self, user_workflow_id):
         payload = {
@@ -650,8 +682,7 @@ class SessionManager(BaseModel):
             except requests.RequestException as e:
                 consecutive_failures += 1
                 self.logger.error(
-                    f"Prompt poll network error "
-                    f"({consecutive_failures}/3): {e}"
+                    f"Prompt poll network error " f"({consecutive_failures}/3): {e}"
                 )
                 if consecutive_failures >= 3:
                     raise AuthenticationError(
@@ -742,8 +773,18 @@ class SessionManager(BaseModel):
                 # We have a token already; try refresh first
                 try:
                     self._refresh_oauth2()
-                except AuthenticationError:
+                except AuthenticationError as e:
+                    if _is_permanent_refresh_failure(e):
+                        # 401 / 403 / invalid_grant: token revoked, no point
+                        # silently falling through to a password login — that
+                        # would present as an unrelated MFA prompt. Surface
+                        # the real auth denial instead.
+                        raise
                     if self.login_set:
+                        self.logger.warning(
+                            "Refresh failed, falling back to password login",
+                            exc_info=True,
+                        )
                         self._login_oauth2()
                     else:
                         raise
@@ -760,8 +801,15 @@ class SessionManager(BaseModel):
                 try:
                     self._refresh_oauth2()
                     return
-                except AuthenticationError:
-                    pass
+                except AuthenticationError as e:
+                    if _is_permanent_refresh_failure(e):
+                        # Token revoked — surface the real cause with
+                        # __cause__ preserved so callers can debug.
+                        raise
+                    self.logger.warning(
+                        "Refresh failed, falling back to password login",
+                        exc_info=True,
+                    )
             if self.login_set:
                 self._login_oauth2()
             else:

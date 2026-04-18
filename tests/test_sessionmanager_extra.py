@@ -658,8 +658,38 @@ def test_login_no_auth_with_oauth_refresh_succeeds(sm):
     relogin.assert_not_called()
 
 
-def test_login_no_auth_oauth_refresh_fails_falls_back_to_relogin(sm):
-    """Pre-existing oauth whose refresh fails falls back to _login_oauth2 when creds present."""
+def _auth_error_with_status(msg, status_code):
+    """Build an AuthenticationError with a `.status_code` attribute, matching
+    the contract `_refresh_oauth2` produces after the silent-failure fix."""
+    from pyrh.exceptions import AuthenticationError
+
+    err = AuthenticationError(msg)
+    err.status_code = status_code
+    return err
+
+
+def test_login_no_auth_oauth_transient_refresh_fails_falls_back_to_relogin(sm):
+    """Transient (5xx) refresh failure falls back to _login_oauth2 when creds present."""
+    sm.oauth.access_token = "at"
+    sm.oauth.refresh_token = "rt"
+
+    with (
+        mock.patch.object(
+            sm,
+            "_refresh_oauth2",
+            side_effect=_auth_error_with_status("boom", 503),
+        ),
+        mock.patch.object(sm, "_login_oauth2") as relogin,
+    ):
+        sm.login()
+
+    relogin.assert_called_once_with()
+
+
+def test_login_no_auth_oauth_permanent_refresh_fails_reraises(sm):
+    """Permanent (401) refresh failure propagates even when creds are set —
+    silently falling through to password login would mask a revoked session.
+    """
     from pyrh.exceptions import AuthenticationError
 
     sm.oauth.access_token = "at"
@@ -667,13 +697,16 @@ def test_login_no_auth_oauth_refresh_fails_falls_back_to_relogin(sm):
 
     with (
         mock.patch.object(
-            sm, "_refresh_oauth2", side_effect=AuthenticationError("boom")
+            sm,
+            "_refresh_oauth2",
+            side_effect=_auth_error_with_status("revoked", 401),
         ),
         mock.patch.object(sm, "_login_oauth2") as relogin,
     ):
-        sm.login()
+        with pytest.raises(AuthenticationError, match="revoked"):
+            sm.login()
 
-    relogin.assert_called_once_with()
+    relogin.assert_not_called()
 
 
 def test_login_no_auth_oauth_refresh_fails_no_creds_reraises(sm):
@@ -686,7 +719,9 @@ def test_login_no_auth_oauth_refresh_fails_no_creds_reraises(sm):
     sm.password = None
 
     with mock.patch.object(
-        sm, "_refresh_oauth2", side_effect=AuthenticationError("boom")
+        sm,
+        "_refresh_oauth2",
+        side_effect=_auth_error_with_status("boom", 503),
     ):
         with pytest.raises(AuthenticationError, match="boom"):
             sm.login()
@@ -708,7 +743,71 @@ def test_login_force_refresh_with_oauth(sm):
     relogin.assert_not_called()
 
 
-def test_login_force_refresh_refresh_fails_falls_back(sm):
+def test_login_force_refresh_transient_failure_falls_back(sm, caplog):
+    """force_refresh with a transient (5xx) refresh failure falls back to
+    password login AND logs a warning with exc_info so the original cause
+    survives in the logs.
+    """
+    import logging
+
+    sm.oauth.access_token = "at"
+    sm.oauth.refresh_token = "rt"
+    sm.session.headers["Authorization"] = "Bearer at"
+
+    caplog.set_level(logging.WARNING, logger="pyrh.models.sessionmanager")
+    with (
+        mock.patch.object(
+            sm,
+            "_refresh_oauth2",
+            side_effect=_auth_error_with_status("service unavailable", 503),
+        ),
+        mock.patch.object(sm, "_login_oauth2") as relogin,
+    ):
+        sm.login(force_refresh=True)
+
+    relogin.assert_called_once_with()
+    assert any(
+        "Refresh failed, falling back to password login" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_login_refresh_failure_without_status_code_is_treated_as_permanent(sm):
+    """AuthenticationError raised by `_refresh_oauth2` without a
+    `status_code` attribute (e.g. the pre-flight "No refresh token
+    available" guard) must be treated as permanent and re-raised — never
+    silently swallowed into a password login.
+    """
+    from pyrh.exceptions import AuthenticationError
+
+    sm.oauth.access_token = "at"
+    sm.oauth.refresh_token = "rt"
+    sm.session.headers["Authorization"] = "Bearer at"
+
+    # AuthenticationError with NO status_code attr — covers the
+    # `status is None -> return True` branch of _is_permanent_refresh_failure.
+    with (
+        mock.patch.object(
+            sm,
+            "_refresh_oauth2",
+            side_effect=AuthenticationError("no refresh token"),
+        ),
+        mock.patch.object(sm, "_login_oauth2") as relogin,
+    ):
+        with pytest.raises(AuthenticationError, match="no refresh token"):
+            sm.login(force_refresh=True)
+
+    relogin.assert_not_called()
+
+
+def test_login_force_refresh_permanent_failure_propagates(sm):
+    """force_refresh with a permanent (401) refresh failure MUST propagate.
+
+    Prior to the silent-failure fix, a revoked refresh-token quietly fell
+    through to `_login_oauth2()` and the user saw an unrelated MFA prompt.
+    Now the AuthenticationError is re-raised so the real cause ("your
+    session was revoked, log in again") surfaces to the caller.
+    """
     from pyrh.exceptions import AuthenticationError
 
     sm.oauth.access_token = "at"
@@ -716,12 +815,17 @@ def test_login_force_refresh_refresh_fails_falls_back(sm):
     sm.session.headers["Authorization"] = "Bearer at"
 
     with (
-        mock.patch.object(sm, "_refresh_oauth2", side_effect=AuthenticationError("x")),
+        mock.patch.object(
+            sm,
+            "_refresh_oauth2",
+            side_effect=_auth_error_with_status("invalid_grant", 401),
+        ),
         mock.patch.object(sm, "_login_oauth2") as relogin,
     ):
-        sm.login(force_refresh=True)
+        with pytest.raises(AuthenticationError, match="invalid_grant"):
+            sm.login(force_refresh=True)
 
-    relogin.assert_called_once_with()
+    relogin.assert_not_called()
 
 
 def test_login_already_authenticated_is_noop(sm):
@@ -1127,7 +1231,9 @@ def test_refresh_oauth2_success_configures_manager(sm):
 
 def test_refresh_oauth2_http_500_raises_auth_error(sm):
     """Non-200 (or invalid-oauth) response from the refresh endpoint raises
-    AuthenticationError. Exercises the warning + raise branch."""
+    AuthenticationError with `.status_code` set so `login()` can classify
+    the failure as transient (5xx → fall back) vs permanent (4xx → re-raise).
+    """
     from pyrh import urls
     from pyrh.exceptions import AuthenticationError
 
@@ -1143,8 +1249,36 @@ def test_refresh_oauth2_http_500_raises_auth_error(sm):
         status_code=500,
     )
 
-    with pytest.raises(AuthenticationError, match="Failed to refresh token"):
+    with pytest.raises(
+        AuthenticationError, match="Failed to refresh token"
+    ) as exc_info:
         sm._refresh_oauth2()
+
+    assert getattr(exc_info.value, "status_code", None) == 500
+
+
+def test_refresh_oauth2_http_401_sets_status_code(sm):
+    """A 401 from the refresh endpoint attaches status_code=401 so `login()`
+    treats the failure as permanent (token revoked)."""
+    from pyrh import urls
+    from pyrh.exceptions import AuthenticationError
+
+    sm.oauth.access_token = "old_at"
+    sm.oauth.refresh_token = "old_rt"
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("https://", adapter)
+    adapter.register_uri(
+        "POST",
+        str(urls.OAUTH),
+        json={"detail": "invalid_grant"},
+        status_code=401,
+    )
+
+    with pytest.raises(AuthenticationError) as exc_info:
+        sm._refresh_oauth2()
+
+    assert getattr(exc_info.value, "status_code", None) == 401
 
 
 def test_mfa_login_workflow_prompt_flow_integration(sm):
