@@ -679,6 +679,13 @@ class SessionManager(BaseModel):
                     auto_login=False,
                     return_response=True,
                 )
+            except requests.exceptions.InvalidJSONError:
+                # `requests.exceptions.JSONDecodeError` inherits from
+                # `InvalidJSONError` which inherits from `RequestException`.
+                # Without this explicit re-raise the broad catch below would
+                # turn a malformed-payload shape error into a misleading
+                # "network" retry, masking the real cause.
+                raise
             except requests.RequestException as e:
                 consecutive_failures += 1
                 self.logger.error(

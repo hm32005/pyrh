@@ -927,10 +927,39 @@ def test_poll_prompt_approval_request_exception_retries_then_raises(_sleep, sm):
 
 
 @mock.patch("time.sleep", return_value=None)
-def test_poll_prompt_approval_json_decode_error_propagates(_sleep, sm):
-    """A malformed JSON body (raises `json.JSONDecodeError`) must NOT be
-    swallowed by the poll loop. The decoded error should surface so the
-    operator can see exactly what Robinhood returned."""
+def test_poll_prompt_approval_requests_json_decode_error_propagates(_sleep, sm):
+    """A malformed JSON body raised as ``requests.exceptions.JSONDecodeError``
+    must propagate unchanged through ``_poll_prompt_approval``.
+
+    ``requests.exceptions.JSONDecodeError`` has MRO::
+
+        JSONDecodeError -> InvalidJSONError -> RequestException -> IOError
+
+    Without the explicit ``except InvalidJSONError: raise`` guard in
+    ``_poll_prompt_approval``, the broad ``except requests.RequestException``
+    below would swallow it as a network blip and loop until timeout —
+    masking the real "server returned garbage" failure. If the guard is
+    removed, this test fails because the JSONDecodeError is caught by the
+    retry arm and the loop raises ``AuthenticationError("timed out …")``
+    (or the "3 consecutive errors" variant) instead.
+    """
+    import requests
+
+    bad = requests.exceptions.JSONDecodeError("Expecting value", "garbage", 0)
+
+    with mock.patch.object(sm, "get", side_effect=bad):
+        with pytest.raises(requests.exceptions.JSONDecodeError):
+            sm._poll_prompt_approval("c-1", timeout=5, interval=5)
+
+
+@mock.patch("time.sleep", return_value=None)
+def test_poll_prompt_approval_stdlib_json_decode_error_propagates(_sleep, sm):
+    """Companion coverage for the completeness of the fix: a stdlib
+    ``json.JSONDecodeError`` is neither a ``requests.RequestException`` nor
+    an ``InvalidJSONError``, so it must propagate through both the
+    ``InvalidJSONError`` guard and the network-retry arm. If a future
+    refactor replaces the explicit guard with a broader ``except Exception``
+    this test fails."""
     import json
 
     def bad_json(*a, **kw):
