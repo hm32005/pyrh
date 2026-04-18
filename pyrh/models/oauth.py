@@ -29,7 +29,7 @@ class Challenge(BaseModel):
 
         """
         return self.remaining_attempts > 0 and (
-                datetime.now(tz=pytz.utc) < self.expires_in
+            datetime.now(tz=pytz.utc) < self.expires_in
         )
 
 
@@ -56,18 +56,20 @@ class OAuth(BaseModel):
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self.__logger = logging.getLogger(__name__)
+        # NOTE: Never log the raw access_token or refresh_token values. The
+        # earlier implementation did so at INFO level, which is the same class
+        # of leak bd227b3 redacted from sessionmanager. Keep these logs
+        # presence-only (redacted).
         if "access_token" in kwargs:
             self.access_token = kwargs["access_token"]
-            self.logger.info(f"OAuth init| access_token: {kwargs['access_token']}")
+            self.logger.debug("OAuth init| access_token set (redacted)")
         if "refresh_token" in kwargs:
             self.refresh_token = kwargs["refresh_token"]
-            self.logger.info(f"OAuth init| refresh_token {kwargs['refresh_token']}")
+            self.logger.debug("OAuth init| refresh_token set (redacted)")
         if "expires_at" in kwargs:
             utc_now = pendulum.now(tz="UTC")
-            self.logger.info(f"OAuth init| utc_now: {utc_now}")
-            self.logger.info(f"OAuth init| expires_at: {kwargs["expires_at"]}")
             self.expires_in = utc_now.diff(kwargs["expires_at"], abs=False).in_seconds()
-            self.logger.info(f"OAuth init| expires_in: {self.expires_in}")
+            self.logger.debug("OAuth init| expires_in computed=%ss", self.expires_in)
 
     @property
     def logger(self):

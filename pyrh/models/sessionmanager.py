@@ -20,7 +20,7 @@ from pyrh import urls
 from pyrh.constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
 from pyrh.exceptions import AuthenticationError, PyrhValueError
 from pyrh.models.base import BaseModel, BaseSchema, JSON
-from pyrh.models.oauth import (CHALLENGE_TYPE_VAL, OAuth, OAuthSchema)
+from pyrh.models.oauth import CHALLENGE_TYPE_VAL, OAuth, OAuthSchema
 from pyrh.util import JSON_ENCODING, robinhood_headers
 from requests.exceptions import HTTPError
 from requests.structures import CaseInsensitiveDict
@@ -39,10 +39,72 @@ else:
     CaseInsensitiveDictType = CaseInsensitiveDict
 Proxies = Dict[str, str]
 
-HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(
-    robinhood_headers
-)
+HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(robinhood_headers)
 """Headers used when performing requests with robinhood api."""
+
+
+def _truncate_body(res: Any, limit: int = 200) -> str:
+    """Return a safely-truncated representation of a response body for logging.
+
+    Extracts ``res.text`` if it is a string and truncates it to ``limit``
+    characters. Returns ``""`` for Mock objects, missing attrs, or anything
+    non-string — this keeps error messages clean and predictable across real
+    ``requests.Response`` objects and test doubles.
+
+    For binary Content-Types (e.g. image/png, application/octet-stream) the
+    body is NOT emitted — we return a ``<N bytes binary>`` size marker
+    instead. This avoids dumping raw bytes into log messages and error
+    strings, which tends to corrupt terminals and bloats error messages.
+    """
+    text = getattr(res, "text", "")
+    if not isinstance(text, str):
+        return ""
+    headers = getattr(res, "headers", {}) or {}
+    content_type = ""
+    try:
+        content_type = headers.get("Content-Type", "") or ""
+    except AttributeError:
+        content_type = ""
+    if content_type and not content_type.startswith(("text/", "application/json")):
+        content = getattr(res, "content", b"") or b""
+        try:
+            size = len(content)
+        except TypeError:
+            size = 0
+        return f"<{size} bytes binary>"
+    return text[:limit]
+
+
+def _is_permanent_refresh_failure(err: Exception) -> bool:
+    """Return True when a refresh-token failure is permanent.
+
+    Permanent failures (401 unauthorized, 403 forbidden, any 4xx from the
+    oauth endpoint) mean the refresh token was revoked or is otherwise
+    invalid — silently falling back to a password-grant login would mask the
+    root cause and show the user an unrelated MFA prompt.
+
+    Transient failures (5xx, network) are recoverable and the caller may
+    choose to fall back to an interactive login.
+
+    The classification uses the ``status_code`` attribute set on the
+    AuthenticationError by ``_refresh_oauth2`` — if absent (e.g. an
+    unrelated AuthenticationError such as "No refresh token available"),
+    the failure is treated as permanent by default so it is not silently
+    swallowed.
+    """
+    status = getattr(err, "status_code", None)
+    if status is None:
+        return True
+    # 408 Request Timeout, 425 Too Early, 429 Too Many Requests are 4xx in
+    # range but semantically transient — the refresh token itself is fine, the
+    # server just wants us to back off. Treat as transient so the caller can
+    # fall back to a fresh login (or retry) rather than dying on a throttling
+    # spike.
+    _TRANSIENT_4XX = {408, 425, 429}
+    if int(status) in _TRANSIENT_4XX:
+        return False
+    # 4xx → permanent; 5xx → transient; anything else → treat as permanent.
+    return 400 <= int(status) < 500
 
 
 class SessionManager(BaseModel):
@@ -79,14 +141,14 @@ class SessionManager(BaseModel):
     """
 
     def __init__(
-            self,
-            username: Optional[str] = None,
-            password: Optional[str] = None,
-            mfa: Optional[str] = "",
-            challenge_type: Optional[str] = "sms",
-            headers: Optional[CaseInsensitiveDictType] = None,
-            proxies: Optional[Proxies] = None,
-            **kwargs: Any
+        self,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        mfa: Optional[str] = "",
+        challenge_type: Optional[str] = "sms",
+        headers: Optional[CaseInsensitiveDictType] = None,
+        proxies: Optional[Proxies] = None,
+        **kwargs: Any,
     ) -> None:
         self.__logger: Logger = logging.getLogger(__name__)
         self.__logger.info("Initializing session manager!")
@@ -94,7 +156,14 @@ class SessionManager(BaseModel):
         self.__logger.info("MFA Done!")
         self.session: requests.Session = requests.session()
         self.__logger.info("Session done!")
-        self.session.headers = HEADERS if headers is None else headers
+        # Always copy so the module-level HEADERS dict (and any caller-supplied
+        # dict) is never mutated by per-session header changes like
+        # Authorization. See coverage pass 2026-04-17 — this surfaced as
+        # cross-test leakage of `Authorization: Bearer ...` between
+        # SessionManager instances.
+        self.session.headers = CaseInsensitiveDict(
+            HEADERS if headers is None else headers
+        )
         self.__logger.info("Headers done!")
         self.session.proxies = getproxies() if proxies is None else proxies
         self.__logger.info("Proxies done!")
@@ -114,11 +183,13 @@ class SessionManager(BaseModel):
         self.oauth: OAuth = kwargs.pop("oauth", OAuth())
         self.__logger.info("oauth done!")
 
-        epoch_time = pendulum.datetime(1970, 1,
-                                       1,
-                                       tz='UTC')
+        epoch_time = pendulum.datetime(1970, 1, 1, tz="UTC")
 
-        self.expires_at: pendulum.datetime = pendulum.now("UTC").add(seconds=self.oauth.expires_in) if hasattr(self.oauth, "access_token") and self.oauth.expires_in else epoch_time
+        self.expires_at: pendulum.datetime = (
+            pendulum.now("UTC").add(seconds=self.oauth.expires_in)
+            if hasattr(self.oauth, "access_token") and self.oauth.expires_in
+            else epoch_time
+        )
 
         self.__logger.info("expires_at done!")
         self.__logger.info(f"type(self.expires_at): {type(self.expires_at)}")
@@ -186,8 +257,13 @@ class SessionManager(BaseModel):
                         schema=OAuthSchema(),
                     ),
                 )
-            except HTTPError:
-                raise AuthenticationError("Error in finalizing auth token")
+            except HTTPError as e:
+                err_res = getattr(e, "response", None)
+                status = getattr(err_res, "status_code", "?")
+                raise AuthenticationError(
+                    f"Error in finalizing auth token: status={status} "
+                    f"body={_truncate_body(err_res)}"
+                ) from e
         elif oauth_inner.is_challenge and oauth_inner.challenge.can_retry:
             print("Invalid code entered")
             return self._challenge_oauth2(oauth, oauth_payload)
@@ -202,14 +278,21 @@ class SessionManager(BaseModel):
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code != requests.codes.ok:
-            self.logger.error("Challenge Response Error")
-        elif res.status_code == requests.codes.ok and data["status"] == "validated":
+            # Previously this branch just logged and returned False, which the
+            # caller interpreted as "MFA rejected" even when the real cause was
+            # a 5xx / 429 / network error. Surface the real status so the user
+            # sees "Challenge response HTTP 503: …" instead of a misleading
+            # "wrong MFA code" retry prompt.
+            raise AuthenticationError(
+                f"Challenge response HTTP status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            ) from None
+        if data["status"] == "validated":
             return True
-        else:
-            raise AuthenticationError("Challenge Response Error")
+        # 200 received but not validated — genuine "wrong code" signal.
         return False
 
     def _configure_manager(self, oauth: OAuth) -> None:
@@ -223,7 +306,9 @@ class SessionManager(BaseModel):
 
         """
         self.oauth = oauth
-        self.expires_at: pendulum.datetime = pendulum.now(tz="UTC").add(seconds=self.oauth.expires_in)
+        self.expires_at: pendulum.datetime = pendulum.now(tz="UTC").add(
+            seconds=self.oauth.expires_in
+        )
         self.session.headers.update(
             {"Authorization": f"Bearer {self.oauth.access_token}"}
         )
@@ -232,16 +317,30 @@ class SessionManager(BaseModel):
     def _generate_request_id():
         return str(uuid.uuid4())
 
-    def get(self,
-            url: Union[str, URL],
-            params: Optional[Dict[str, Any]] = None,
-            headers: Optional[CaseInsensitiveDictType] = None,
-            raise_errors: bool = True,
-            return_response: bool = False,
-            auto_login: bool = True,
-            schema: Optional[Schema] = None,
-            many: bool = False,
-            ) -> Tuple[Dict[str, Any], Response] | Dict[str, Any]:
+    def _log_bearer_fingerprint(self, label: str, authorization: Optional[str]) -> None:
+        """Emit a short, non-reversible fingerprint of the Authorization
+        header at DEBUG so operators can diff pre- vs post-refresh bearers
+        without the raw token ever hitting logs.
+        """
+        if not authorization:
+            self.logger.debug("bearer_fingerprint %s=<absent>", label)
+            return
+        import hashlib
+
+        digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:8]
+        self.logger.debug("bearer_fingerprint %s=%s", label, digest)
+
+    def get(
+        self,
+        url: Union[str, URL],
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[CaseInsensitiveDictType] = None,
+        raise_errors: bool = True,
+        return_response: bool = False,
+        auto_login: bool = True,
+        schema: Optional[Schema] = None,
+        many: bool = False,
+    ) -> Tuple[Dict[str, Any], Response] | Dict[str, Any]:
         """Run a wrapped session HTTP GET request.
 
         Note:
@@ -281,7 +380,19 @@ class SessionManager(BaseModel):
             headers=self.session.headers if headers is None else headers,
         )
         if res.status_code == 401 and auto_login:
+            old_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("pre-refresh", old_authorization)
             self.login(force_refresh=True)
+            new_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("post-refresh", new_authorization)
+            if new_authorization == old_authorization:
+                # Refresh claimed success but the Authorization header is
+                # unchanged — retrying would replay the same stale bearer and
+                # produce another 401. Surface the inconsistency instead of
+                # silently looping.
+                raise AuthenticationError(
+                    "Refresh succeeded but Authorization header was not updated"
+                )
             res = self.session.get(
                 str(url),
                 params=params,
@@ -296,7 +407,16 @@ class SessionManager(BaseModel):
         return (data, res) if return_response else data
 
     def _get_mfa_code(self):
-        # Try APW first
+        # Try APW first. The two failure modes are intentionally split:
+        #
+        # 1. APW unavailable / timed out (FileNotFoundError, TimeoutExpired):
+        #    the binary isn't on this host or hung. Fall back to input() so
+        #    the user can still complete MFA.
+        # 2. APW returned malformed output (JSONDecodeError, KeyError,
+        #    IndexError): the tool is present but its contract is broken —
+        #    e.g. a security-relevant output-format change. Refuse to fall
+        #    back to interactive input because the operator needs to see
+        #    and investigate the misbehaviour, not silently retype a code.
         try:
             get_otp_proc = subprocess.run(
                 ["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
@@ -305,10 +425,17 @@ class SessionManager(BaseModel):
                 timeout=5,
             )
             if get_otp_proc.returncode == 0:
-                result_json = json.loads(get_otp_proc.stdout)
-                return result_json["results"][0]["code"]
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, FileNotFoundError) as e:
-            self.logger.warning(f"APW OTP failed: {e}")
+                try:
+                    result_json = json.loads(get_otp_proc.stdout)
+                    return result_json["results"][0]["code"]
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    self.logger.error("APW returned malformed payload: %s", e)
+                    raise AuthenticationError(
+                        "APW payload is malformed; refusing to fall back to "
+                        "interactive input"
+                    ) from e
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            self.logger.warning("APW unavailable, falling back to input(): %s", e)
 
         # Fall back to manual input
         self.logger.info("Requesting manual MFA code entry")
@@ -316,18 +443,20 @@ class SessionManager(BaseModel):
 
     def _get_oauth_payload(self):
         oauth_payload = {
-            "client_id":                        CLIENT_ID,
+            "client_id": CLIENT_ID,
             "create_read_only_secondary_token": True,
-            "device_token":                     self.device_token,
-            "expires_in":                       EXPIRATION_TIME,
-            "grant_type":                       "password",
-            "password":                         self.password,
-            "request_id":                       self._generate_request_id(),
-            "scope":                            "internal",
-            "token_request_path":               "/login",
-            "username":                         self.username
+            "device_token": self.device_token,
+            "expires_in": EXPIRATION_TIME,
+            "grant_type": "password",
+            "password": self.password,
+            "request_id": self._generate_request_id(),
+            "scope": "internal",
+            "token_request_path": "/login",
+            "username": self.username,
         }
-        self.logger.debug("OAuth payload generated for user=%s", self.username[:3] + "***")
+        self.logger.debug(
+            "OAuth payload generated for user=%s", self.username[:3] + "***"
+        )
         return oauth_payload
 
     def _login_oauth2(self) -> None:
@@ -358,13 +487,17 @@ class SessionManager(BaseModel):
         else:
             self._configure_manager(oauth)
 
-    def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth | None:
+    def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth:
         machine_id = self._user_machine_request(workflow_id)
         challenge_id, challenge_type = self._user_view_get(machine_id)
-        self.logger.info(f"_mfa_login_workflow| challenge_type: {challenge_type}, challenge_id: {challenge_id}")
+        self.logger.info(
+            f"_mfa_login_workflow| challenge_type: {challenge_type}, challenge_id: {challenge_id}"
+        )
 
         if challenge_type == "prompt":
-            self.logger.info("Device approval required — waiting for user to approve on mobile app")
+            self.logger.info(
+                "Device approval required — waiting for user to approve on mobile app"
+            )
             self._poll_prompt_approval(challenge_id)
         else:
             # SMS / TOTP fallback
@@ -376,10 +509,15 @@ class SessionManager(BaseModel):
             if not self._challenge_response(challenge_id, mfa_code):
                 raise AuthenticationError("Challenge response was not validated")
 
-        if self._user_view_post(machine_id):
-            return self._mfa_oauth2(oauth_payload, OAuthSchema())
+        if not self._user_view_post(machine_id):
+            raise AuthenticationError(
+                "User View POST was not approved; MFA login workflow aborted."
+            )
+        return self._mfa_oauth2(oauth_payload, OAuthSchema())
 
-    def _mfa_oauth2(self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3) -> str | OAuth:
+    def _mfa_oauth2(
+        self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3
+    ) -> str | OAuth:
         """Mfa auth flow.
 
          For people with 2fa.
@@ -408,14 +546,38 @@ class SessionManager(BaseModel):
         self.logger.info("_mfa_oauth2 posted request!")
         attempts -= 1
         self.logger.info(f"_mfa_oauth2 status_code: {res.status_code}")
-        if isinstance(oauth, dict):
-            self.logger.info(f"_mfa_oauth2 oauth keys: {oauth.keys()}")
-        else:
-            self.logger.info(f"_mfa_oauth2 oauth dict: {oauth.__dict__}")
+        # Redact OAuth payload values: never log __dict__ or keys() values at INFO,
+        # as the 200-branch `oauth` is an OAuth model carrying access_token /
+        # refresh_token as attributes, identical leak class to bd227b3.
+        self.logger.debug(
+            "_mfa_oauth2 result type=%s keys=%s",
+            type(oauth).__name__,
+            sorted(vars(oauth) if hasattr(oauth, "__dict__") else oauth),
+        )
         self.logger.debug("_mfa_oauth2 status=%s", res.status_code)
         if res.status_code == 403:
-            workflow_id = oauth["verification_workflow"]["id"]
+            # A 403 should carry a verification_workflow.id under the body,
+            # but a malformed proxy / edge response can drop the shape. Wrap
+            # so the operator sees "Malformed 403 body: …" instead of a raw
+            # KeyError that masks the real authentication stage.
+            try:
+                workflow_id = oauth["verification_workflow"]["id"]
+            except (KeyError, TypeError) as e:
+                raise AuthenticationError(
+                    f"Malformed 403 body: {_truncate_body(res)}"
+                ) from e
             return workflow_id
+
+        # Transport / upstream failures must NOT be retried with "Invalid mfa
+        # code" — the user's MFA code is fine, the server is sick. Surface
+        # the real status so the operator doesn't chase a phantom wrong-code
+        # loop.
+        _TRANSPORT_STATUSES = {429, 500, 502, 503, 504}
+        if res.status_code in _TRANSPORT_STATUSES:
+            raise AuthenticationError(
+                f"OAuth transport error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            ) from None
 
         if res.status_code != requests.codes.ok and attempts > 0:
             self.logger.error("Invalid mfa code")
@@ -427,15 +589,15 @@ class SessionManager(BaseModel):
             raise AuthenticationError("Too many incorrect mfa attempts")
 
     def post(
-            self,
-            url: Union[str, URL],
-            data: Optional[JSON] = None,
-            headers: Optional[CaseInsensitiveDictType] = None,
-            raise_errors: bool = True,
-            return_response: bool = False,
-            auto_login: bool = True,
-            schema: Optional[Schema] = None,
-            many: bool = False,
+        self,
+        url: Union[str, URL],
+        data: Optional[JSON] = None,
+        headers: Optional[CaseInsensitiveDictType] = None,
+        raise_errors: bool = True,
+        return_response: bool = False,
+        auto_login: bool = True,
+        schema: Optional[Schema] = None,
+        many: bool = False,
     ) -> Any:
         """Run a wrapped session HTTP POST request.
 
@@ -478,7 +640,18 @@ class SessionManager(BaseModel):
         )
         self.logger.debug("POST %s status=%s", str(url), res.status_code)
         if (res.status_code == 401) and auto_login:
+            old_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("pre-refresh", old_authorization)
             self.login(force_refresh=True)
+            new_authorization = self.session.headers.get("Authorization")
+            self._log_bearer_fingerprint("post-refresh", new_authorization)
+            if new_authorization == old_authorization:
+                # See matching note in `get()`: refresh claims success but
+                # bearer is unchanged → retrying loops forever on the stale
+                # token.
+                raise AuthenticationError(
+                    "Refresh succeeded but Authorization header was not updated"
+                )
             res = self.session.post(
                 str(url),
                 json=data,
@@ -501,56 +674,82 @@ class SessionManager(BaseModel):
 
         """
         self.logger.info("Refreshing token")
-        if not self.oauth or not self.oauth.is_valid or not hasattr(self.oauth, "refresh_token"):
+        if (
+            not self.oauth
+            or not self.oauth.is_valid
+            or not hasattr(self.oauth, "refresh_token")
+        ):
             raise AuthenticationError("No refresh token available")
 
         refresh_payload = {
-            "client_id":     CLIENT_ID,
-            "grant_type":    "refresh_token",
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
             "refresh_token": self.oauth.refresh_token,
-            "device_token":  self.device_token,
-            "scope":         "internal",
+            "device_token": self.device_token,
+            "scope": "internal",
         }
 
-        oauth, res = self.post(
-            urls.OAUTH,
-            data=refresh_payload,
-            raise_errors=False,
-            auto_login=False,
-            return_response=True,
-            schema=OAuthSchema(),
-        )
+        try:
+            oauth, res = self.post(
+                urls.OAUTH,
+                data=refresh_payload,
+                raise_errors=False,
+                auto_login=False,
+                return_response=True,
+                schema=OAuthSchema(),
+            )
+        except requests.RequestException as e:
+            # A raw `requests` network-layer failure (DNS, TCP reset, read
+            # timeout) has no HTTP status. Without a synthetic status_code
+            # the `_is_permanent_refresh_failure` classifier would see
+            # `status is None` and return True — killing the session on a
+            # flaky WiFi blip. Attach 503 to force a transient classification
+            # so the caller falls back to a fresh interactive login.
+            err = AuthenticationError(f"refresh network error: {e}")
+            err.status_code = 503
+            raise err from e
 
-        if res.status_code == requests.codes.ok and hasattr(oauth, "is_valid") and oauth.is_valid:
+        if (
+            res.status_code == requests.codes.ok
+            and hasattr(oauth, "is_valid")
+            and oauth.is_valid
+        ):
             self._configure_manager(oauth)
             self.logger.info("Token refreshed successfully")
         else:
             self.logger.warning("Token refresh failed, falling back to full login")
-            raise AuthenticationError("Failed to refresh token")
+            err = AuthenticationError(
+                f"Failed to refresh token: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
+            # Attach the HTTP status so callers (notably `login`) can classify
+            # the failure as permanent (401/403/4xx token revoked) vs
+            # transient (5xx / network) without re-parsing the message.
+            err.status_code = res.status_code
+            raise err
 
     def _user_machine_request(self, user_workflow_id):
-        payload = \
-            {
-                "device_id": self.device_token,
-                "flow":      "suv",
-                "input":
-                             {
-                                 "workflow_id": user_workflow_id
-                             }
-            }
+        payload = {
+            "device_id": self.device_token,
+            "flow": "suv",
+            "input": {"workflow_id": user_workflow_id},
+        }
         self.session.headers["Content-Type"] = JSON_ENCODING
         data, res = self.post(
             urls.USER_MACHINE,
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code == requests.codes.ok:
             return data["id"]
         else:
             self.logger.info(res.status_code)
-            raise AuthenticationError("User Machine Error")
+            raise AuthenticationError(
+                f"User Machine Error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
 
     def _poll_prompt_approval(self, challenge_id, timeout=120, interval=5):
         """Poll /push/{challenge_id}/get_prompts_status/ for device approval.
@@ -564,11 +763,23 @@ class SessionManager(BaseModel):
             True when the challenge_status is ``"validated"``.
 
         Raises:
-            AuthenticationError: If the challenge is denied, expired, or times out.
+            AuthenticationError: If the challenge is denied, expired, times out,
+                or if the poll endpoint raises ``requests.RequestException`` on
+                three consecutive attempts.
+
+        Notes:
+            Only network-layer failures (``requests.RequestException``) are
+            retried. Shape errors (``KeyError``, ``json.JSONDecodeError``, etc.)
+            propagate unchanged so the operator sees the real cause instead of
+            a misleading timeout.
         """
         import time
-        prompt_url = str(urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/")
+
+        prompt_url = str(
+            urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/"
+        )
         elapsed = 0
+        consecutive_failures = 0
         while elapsed < timeout:
             time.sleep(interval)
             elapsed += interval
@@ -579,30 +790,66 @@ class SessionManager(BaseModel):
                     auto_login=False,
                     return_response=True,
                 )
-                if res.status_code == 200:
-                    status = data.get("challenge_status", "unknown")
-                    self.logger.info(f"Prompt status: {status} ({elapsed}s)")
-                    if status == "validated":
-                        return True
-                    if status in ("denied", "expired"):
-                        raise AuthenticationError(f"Device approval {status}")
-            except AuthenticationError:
+            except requests.exceptions.InvalidJSONError:
+                # `requests.exceptions.JSONDecodeError` inherits from
+                # `InvalidJSONError` which inherits from `RequestException`.
+                # Without this explicit re-raise the broad catch below would
+                # turn a malformed-payload shape error into a misleading
+                # "network" retry, masking the real cause.
                 raise
-            except Exception as e:
-                self.logger.error(f"Prompt poll error: {e}")
+            except requests.RequestException as e:
+                consecutive_failures += 1
+                self.logger.error(
+                    f"Prompt poll network error " f"({consecutive_failures}/3): {e}"
+                )
+                if consecutive_failures >= 3:
+                    raise AuthenticationError(
+                        f"Prompt polling failed after 3 consecutive errors: {e}"
+                    ) from e
+                continue
+            # DoS-proofing: a persistent 5xx from the poll endpoint (no
+            # RequestException raised, so we reach here) should still count
+            # as a failure. Otherwise a timeout-never-raising upstream would
+            # let us loop for the full `timeout` window, wasting cycles and
+            # swallowing the real cause. Only reset the counter on a clean
+            # 200 with a known status value.
+            status_reset_ok = res.status_code == 200 and data.get(
+                "challenge_status"
+            ) in ("issued", "unknown")
+            if res.status_code >= 500:
+                consecutive_failures += 1
+                self.logger.error(
+                    "Prompt poll server error (%s/3): status=%s",
+                    consecutive_failures,
+                    res.status_code,
+                )
+                if consecutive_failures >= 3:
+                    raise AuthenticationError(
+                        f"Prompt polling failed after 3 consecutive "
+                        f"server errors (last status={res.status_code})"
+                    ) from None
+            elif status_reset_ok:
+                consecutive_failures = 0
+            if res.status_code == 200:
+                status = data.get("challenge_status", "unknown")
+                self.logger.info(f"Prompt status: {status} ({elapsed}s)")
+                if status == "validated":
+                    return True
+                if status in ("denied", "expired"):
+                    raise AuthenticationError(f"Device approval {status}")
         raise AuthenticationError(f"Device approval timed out after {timeout}s")
 
     def _user_view_get(self, machine_id):
         request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
         data, res = self.get(
-            request_url,
-            raise_errors=False,
-            auto_login=False,
-            return_response=True
+            request_url, raise_errors=False, auto_login=False, return_response=True
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("User View Error")
-            raise AuthenticationError("User View Error")
+            raise AuthenticationError(
+                f"User View Error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
         sheriff_challenge = data["context"]["sheriff_challenge"]
         challenge_id = sheriff_challenge["id"]
         challenge_type = sheriff_challenge.get("type", "sms")
@@ -616,14 +863,19 @@ class SessionManager(BaseModel):
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code != requests.codes.ok:
-            self.logger.error("User View Error")
-        elif res.status_code == requests.codes.ok and data["type_context"]["result"] == "workflow_status_approved":
+            # Previously the non-200 branch was "log and return False" which
+            # the caller turned into a generic "MFA login workflow aborted"
+            # error, hiding the real HTTP status. Surface it instead.
+            raise AuthenticationError(
+                f"User View POST HTTP status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            ) from None
+        if data["type_context"]["result"] == "workflow_status_approved":
             return True
-        else:
-            raise AuthenticationError("User View Error")
+        # 200 received but workflow was not approved — genuine denial signal.
         return False
 
     @property
@@ -651,15 +903,26 @@ class SessionManager(BaseModel):
 
         """
         self.logger.info(
-            f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}")
+            f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}"
+        )
         if "Authorization" not in self.session.headers:
             # No active Authorization header — need to establish a session
             if self.oauth and self.oauth.is_valid:
                 # We have a token already; try refresh first
                 try:
                     self._refresh_oauth2()
-                except AuthenticationError:
+                except AuthenticationError as e:
+                    if _is_permanent_refresh_failure(e):
+                        # 401 / 403 / invalid_grant: token revoked, no point
+                        # silently falling through to a password login — that
+                        # would present as an unrelated MFA prompt. Surface
+                        # the real auth denial instead.
+                        raise
                     if self.login_set:
+                        self.logger.warning(
+                            "Refresh failed, falling back to password login",
+                            exc_info=True,
+                        )
                         self._login_oauth2()
                     else:
                         raise
@@ -667,19 +930,31 @@ class SessionManager(BaseModel):
             elif self.login_set:
                 self._login_oauth2()
             else:
-                raise AuthenticationError("Valid auth token not sent and login credentials missing")
+                raise AuthenticationError(
+                    "Valid auth token not sent and login credentials missing"
+                )
         elif force_refresh or self.token_expired:
             # Already have Authorization header but token needs refreshing
             if self.oauth and self.oauth.is_valid:
                 try:
                     self._refresh_oauth2()
                     return
-                except AuthenticationError:
-                    pass
+                except AuthenticationError as e:
+                    if _is_permanent_refresh_failure(e):
+                        # Token revoked — surface the real cause with
+                        # __cause__ preserved so callers can debug.
+                        raise
+                    self.logger.warning(
+                        "Refresh failed, falling back to password login",
+                        exc_info=True,
+                    )
             if self.login_set:
                 self._login_oauth2()
             else:
-                raise AuthenticationError("Cannot refresh: no refresh token and no login credentials")
+                raise AuthenticationError(
+                    "Cannot refresh: no refresh token and no login credentials"
+                )
+
     @property
     def login_set(self) -> bool:
         """Check if login info is properly configured.
@@ -701,8 +976,12 @@ class SessionManager(BaseModel):
             self.post(urls.OAUTH_REVOKE, data=logout_payload, auto_login=False)
             self.oauth = OAuth()
             self.session.headers.pop("Authorization", None)
-        except HTTPError:
-            raise AuthenticationError("Could not log out")
+        except HTTPError as e:
+            err_res = getattr(e, "response", None)
+            status = getattr(err_res, "status_code", "?")
+            raise AuthenticationError(
+                f"Could not log out: status={status} body={_truncate_body(err_res)}"
+            ) from e
 
     @property
     def token_expired(self) -> bool:
@@ -712,7 +991,9 @@ class SessionManager(BaseModel):
             True if expired otherwise False
         """
         self.logger.info(f"token_expired| self.expires_at: {self.expires_at}")
-        self.logger.info(f"token_expired| type(self.expires_at): {type(self.expires_at)}")
+        self.logger.info(
+            f"token_expired| type(self.expires_at): {type(self.expires_at)}"
+        )
         return pendulum.now(tz="UTC") > self.expires_at
 
 

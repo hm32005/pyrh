@@ -115,7 +115,9 @@ def test_mfa_login_workflow_prompt_type(mock_sleep, sm):
         mock.patch.object(sm, "_user_view_get", return_value=(challenge_id, "prompt")),
         mock.patch.object(sm, "_poll_prompt_approval", return_value=True) as mock_poll,
         mock.patch.object(sm, "_user_view_post", return_value=True),
-        mock.patch.object(sm, "_mfa_oauth2", return_value=_make_valid_oauth()) as mock_mfa,
+        mock.patch.object(
+            sm, "_mfa_oauth2", return_value=_make_valid_oauth()
+        ) as mock_mfa,
     ):
         result = sm._mfa_login_workflow("workflow-id", {"some": "payload"})
 
