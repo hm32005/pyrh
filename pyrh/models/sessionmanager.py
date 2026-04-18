@@ -635,14 +635,25 @@ class SessionManager(BaseModel):
             "scope": "internal",
         }
 
-        oauth, res = self.post(
-            urls.OAUTH,
-            data=refresh_payload,
-            raise_errors=False,
-            auto_login=False,
-            return_response=True,
-            schema=OAuthSchema(),
-        )
+        try:
+            oauth, res = self.post(
+                urls.OAUTH,
+                data=refresh_payload,
+                raise_errors=False,
+                auto_login=False,
+                return_response=True,
+                schema=OAuthSchema(),
+            )
+        except requests.RequestException as e:
+            # A raw `requests` network-layer failure (DNS, TCP reset, read
+            # timeout) has no HTTP status. Without a synthetic status_code
+            # the `_is_permanent_refresh_failure` classifier would see
+            # `status is None` and return True — killing the session on a
+            # flaky WiFi blip. Attach 503 to force a transient classification
+            # so the caller falls back to a fresh interactive login.
+            err = AuthenticationError(f"refresh network error: {e}")
+            err.status_code = 503
+            raise err from e
 
         if (
             res.status_code == requests.codes.ok

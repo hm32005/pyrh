@@ -1480,6 +1480,39 @@ def test_mfa_login_workflow_prompt_flow_integration(sm):
     assert sm.oauth.refresh_token == "final_rt"
 
 
+def test_refresh_oauth2_network_error_classified_as_transient(sm):
+    """Regression: a raw ``requests.RequestException`` (DNS, TCP reset, read
+    timeout) from the inner ``post()`` has no HTTP status. Without the fix
+    this fell out of ``_refresh_oauth2`` unchanged, so the classifier at
+    ``login()`` saw ``status is None`` and returned True (permanent) — killing
+    the session on a flaky WiFi blip. After the fix, the RequestException is
+    wrapped in AuthenticationError with ``status_code=503`` so the classifier
+    treats it as transient and the caller can fall back / retry.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #7.
+    """
+    import requests
+
+    from pyrh.exceptions import AuthenticationError
+    from pyrh.models.sessionmanager import _is_permanent_refresh_failure
+
+    sm.oauth.access_token = "old_at"
+    sm.oauth.refresh_token = "old_rt"
+
+    network_err = requests.ConnectionError("DNS lookup failed")
+    with mock.patch.object(sm, "post", side_effect=network_err):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._refresh_oauth2()
+
+    # The wrapped error must carry status_code=503 so the classifier treats
+    # it as transient (load-bearing assertion).
+    assert exc_info.value.status_code == 503
+    assert _is_permanent_refresh_failure(exc_info.value) is False
+    # Cause chain preserves the original requests exception for diagnostics.
+    assert exc_info.value.__cause__ is network_err
+
+
 def test_refresh_oauth2_no_refresh_token_raises(sm):
     """When the stored oauth has no refresh_token, the pre-flight guard
     raises AuthenticationError before any HTTP call is made."""
