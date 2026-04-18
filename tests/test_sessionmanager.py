@@ -452,8 +452,12 @@ def test_authenticated(sm, monkeypatch):
     assert sm.authenticated
 
 
-@mock.patch("pyrh.models.SessionManager.login")
-def test_get(mock_login, sm):
+def test_get(sm):
+    # `login()` is stubbed to rotate the bearer so the 401-retry guard
+    # (sessionmanager fix #8) sees a changed Authorization header and
+    # proceeds to the retry request. Without rotation it would (correctly)
+    # raise AuthenticationError("Refresh succeeded but Authorization
+    # header was not updated").
     import json
 
     from requests.exceptions import HTTPError
@@ -469,20 +473,27 @@ def test_get(mock_login, sm):
     ]
     adapter.register_uri("GET", mock_url, expected)
 
-    resp1 = sm.get(mock_url)
-    resp2 = sm.get(mock_url)
+    sm.session.headers["Authorization"] = "Bearer OLD"
+    login_calls = {"n": 0}
 
-    with pytest.raises(HTTPError) as e:
-        sm.get(mock_url)
+    def _fake_login(force_refresh=False):
+        login_calls["n"] += 1
+        sm.session.headers["Authorization"] = f"Bearer NEW_{login_calls['n']}"
+
+    with mock.patch.object(sm, "login", side_effect=_fake_login):
+        resp1 = sm.get(mock_url)
+        resp2 = sm.get(mock_url)
+
+        with pytest.raises(HTTPError) as e:
+            sm.get(mock_url)
 
     assert resp1 == json.loads(expected[0]["text"])
     assert resp2 == json.loads(expected[2]["text"])
-    assert mock_login.call_count == 1
+    assert login_calls["n"] == 1
     assert "404 Client Error" in str(e.value)
 
 
-@mock.patch("pyrh.models.SessionManager.login")
-def test_post(mock_login, sm):
+def test_post(sm):
     import json
 
     from requests.exceptions import HTTPError
@@ -497,13 +508,21 @@ def test_post(mock_login, sm):
     ]
     adapter.register_uri("POST", mock_url, expected)
 
-    resp1 = sm.post(mock_url)
+    sm.session.headers["Authorization"] = "Bearer OLD"
+    login_calls = {"n": 0}
 
-    with pytest.raises(HTTPError) as e:
-        sm.post(mock_url)
+    def _fake_login(force_refresh=False):
+        login_calls["n"] += 1
+        sm.session.headers["Authorization"] = f"Bearer NEW_{login_calls['n']}"
+
+    with mock.patch.object(sm, "login", side_effect=_fake_login):
+        resp1 = sm.post(mock_url)
+
+        with pytest.raises(HTTPError) as e:
+            sm.post(mock_url)
 
     assert resp1 == json.loads(expected[1]["text"])
-    assert mock_login.call_count == 1
+    assert login_calls["n"] == 1
     assert "404 Client Error" in str(e.value)
 
 

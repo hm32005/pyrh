@@ -890,11 +890,18 @@ def test_is_permanent_refresh_failure_classifies_5xx_as_transient(status):
     assert _is_permanent_refresh_failure(err) is False
 
 
-def test_login_no_auth_oauth_transient_refresh_fails_falls_back_to_relogin(sm):
-    """Transient (5xx) refresh failure falls back to _login_oauth2 when creds present."""
+def test_login_no_auth_oauth_transient_refresh_fails_falls_back_to_relogin(sm, caplog):
+    """Transient (5xx) refresh failure falls back to _login_oauth2 when creds
+    present. Tightens the prior assertion with a caplog check (finding #11):
+    the fallback must be announced as a WARNING with exc_info attached so
+    operators can diagnose the original cause from logs alone.
+    """
+    import logging
+
     sm.oauth.access_token = "at"
     sm.oauth.refresh_token = "rt"
 
+    caplog.set_level(logging.WARNING, logger="pyrh.models.sessionmanager")
     with (
         mock.patch.object(
             sm,
@@ -906,6 +913,15 @@ def test_login_no_auth_oauth_transient_refresh_fails_falls_back_to_relogin(sm):
         sm.login()
 
     relogin.assert_called_once_with()
+    matching = [
+        rec
+        for rec in caplog.records
+        if "Refresh failed, falling back" in rec.getMessage()
+    ]
+    assert matching, "expected warning not emitted"
+    rec = matching[0]
+    assert rec.levelno == logging.WARNING
+    assert rec.exc_info is not None
 
 
 def test_login_no_auth_oauth_permanent_refresh_fails_reraises(sm):
@@ -968,7 +984,9 @@ def test_login_force_refresh_with_oauth(sm):
 def test_login_force_refresh_transient_failure_falls_back(sm, caplog):
     """force_refresh with a transient (5xx) refresh failure falls back to
     password login AND logs a warning with exc_info so the original cause
-    survives in the logs.
+    survives in the logs. Tightens previously-vacuous caplog substring
+    assertion (finding #11) to additionally pin the record level
+    (WARNING) and exc_info presence.
     """
     import logging
 
@@ -988,10 +1006,17 @@ def test_login_force_refresh_transient_failure_falls_back(sm, caplog):
         sm.login(force_refresh=True)
 
     relogin.assert_called_once_with()
-    assert any(
-        "Refresh failed, falling back to password login" in rec.getMessage()
+    matching = [
+        rec
         for rec in caplog.records
-    )
+        if "Refresh failed, falling back to password login" in rec.getMessage()
+    ]
+    assert matching, "expected warning not emitted"
+    rec = matching[0]
+    assert rec.levelno == logging.WARNING
+    # `exc_info=True` on the logger call → a tuple must be attached so
+    # the original AuthenticationError survives in logs.
+    assert rec.exc_info is not None
 
 
 def test_login_refresh_failure_without_status_code_is_treated_as_permanent(sm):
@@ -1044,10 +1069,12 @@ def test_login_force_refresh_permanent_failure_propagates(sm):
         ),
         mock.patch.object(sm, "_login_oauth2") as relogin,
     ):
-        with pytest.raises(AuthenticationError, match="invalid_grant"):
+        with pytest.raises(AuthenticationError, match="invalid_grant") as exc_info:
             sm.login(force_refresh=True)
 
     relogin.assert_not_called()
+    # The re-raised error must preserve the classifier signal (finding #11).
+    assert exc_info.value.status_code == 401
 
 
 def test_login_already_authenticated_is_noop(sm):
@@ -1221,7 +1248,18 @@ def test_poll_prompt_approval_stdlib_json_decode_error_propagates(_sleep, sm):
 @mock.patch("time.sleep", return_value=None)
 def test_poll_prompt_approval_request_exception_resets_on_success(_sleep, sm):
     """One transient request failure followed by a success must reset the
-    consecutive-failure counter so the session isn't abandoned on a blip."""
+    consecutive-failure counter so the session isn't abandoned on a blip.
+
+    Previously this was a 2-iteration test (blip → validated) which didn't
+    actually exercise the reset — the counter was never checked again.
+    Now uses a 5-iteration scenario (blip, issued, blip, blip, validated):
+    without the reset, the 3rd/4th blips would have tripped the threshold
+    and raised; with the reset after the ``issued`` success, the 3-blip
+    budget is restored and we reach the 5th (validated) iteration.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #11.
+    """
     import requests
 
     calls = {"n": 0}
@@ -1229,12 +1267,25 @@ def test_poll_prompt_approval_request_exception_resets_on_success(_sleep, sm):
     def flaky(*a, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise requests.ConnectionError("blip")
-        # Second iteration: success, validated.
+            raise requests.ConnectionError("blip-1")
+        if calls["n"] == 2:
+            # Clean success — must reset the counter.
+            return ({"challenge_status": "issued"}, _mock_response(200))
+        if calls["n"] == 3:
+            raise requests.ConnectionError("blip-2")
+        if calls["n"] == 4:
+            raise requests.ConnectionError("blip-3")
+        # 5th iteration: success, validated.
         return ({"challenge_status": "validated"}, _mock_response(200))
 
-    with mock.patch.object(sm, "get", side_effect=flaky):
+    with mock.patch.object(sm, "get", side_effect=flaky) as mock_get:
+        # 5 iterations @ 5s needs at least 25s timeout.
         assert sm._poll_prompt_approval("c-1", timeout=30, interval=5) is True
+
+    # All five iterations must have been exercised; without the reset, the
+    # function would have raised after iteration 4 (three consecutive blips
+    # counting the initial one).
+    assert mock_get.call_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -1799,6 +1850,8 @@ def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
 def test_user_machine_request_error_includes_status_in_message(sm):
     """`_user_machine_request` on a non-200 must embed the server status code
     in the AuthenticationError message so operators see the real cause.
+    Finding #12: assert the exact f-string token ``status=NNN`` instead of
+    a bare substring (which would pass on e.g. ``"5000 other things"``).
     """
     from pyrh.exceptions import AuthenticationError
 
@@ -1807,11 +1860,16 @@ def test_user_machine_request_error_includes_status_in_message(sm):
     with mock.patch.object(sm, "post", return_value=({"error": "bad"}, resp)):
         with pytest.raises(AuthenticationError) as exc_info:
             sm._user_machine_request("wf-1")
-    assert "500" in str(exc_info.value)
+    assert "status=500" in str(exc_info.value)
+    # Guard against a future accidental `from e` that would chain an
+    # arbitrary __cause__ into the message. This site should NOT chain.
+    assert exc_info.value.__cause__ is None
 
 
 def test_user_view_get_error_includes_status_in_message(sm):
-    """`_user_view_get` on a non-200 surfaces the server status."""
+    """`_user_view_get` on a non-200 surfaces the server status.
+    Finding #12: assert ``status=502`` (exact token) and non-chained cause.
+    """
     from pyrh.exceptions import AuthenticationError
 
     resp = _mock_response(502)
@@ -1819,7 +1877,8 @@ def test_user_view_get_error_includes_status_in_message(sm):
     with mock.patch.object(sm, "get", return_value=({}, resp)):
         with pytest.raises(AuthenticationError) as exc_info:
             sm._user_view_get("m-123")
-    assert "502" in str(exc_info.value)
+    assert "status=502" in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
 
 
 def test_user_view_post_non_approved_200_returns_false_signal(sm):
