@@ -1312,3 +1312,118 @@ def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
     assert "SHOULD_NOT_APPEAR" not in joined
     # the new redacted DEBUG log still captures the shape for operators
     assert "_mfa_oauth2 result type=" in joined
+
+
+# ---------------------------------------------------------------------------
+# Exception-chaining regressions — every "raise AuthenticationError(...)" on a
+# `requests`-layer failure must preserve the original exception in __cause__
+# AND include the HTTP status in the message.
+# ---------------------------------------------------------------------------
+
+
+def test_user_machine_request_error_includes_status_in_message(sm):
+    """`_user_machine_request` on a non-200 must embed the server status code
+    in the AuthenticationError message so operators see the real cause.
+    """
+    from pyrh.exceptions import AuthenticationError
+
+    resp = _mock_response(500)
+    resp.text = "internal server"
+    with mock.patch.object(sm, "post", return_value=({"error": "bad"}, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._user_machine_request("wf-1")
+    assert "500" in str(exc_info.value)
+
+
+def test_user_view_get_error_includes_status_in_message(sm):
+    """`_user_view_get` on a non-200 surfaces the server status."""
+    from pyrh.exceptions import AuthenticationError
+
+    resp = _mock_response(502)
+    resp.text = "bad gateway"
+    with mock.patch.object(sm, "get", return_value=({}, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._user_view_get("m-123")
+    assert "502" in str(exc_info.value)
+
+
+def test_user_view_post_non_approved_200_includes_status_in_message(sm):
+    """`_user_view_post` on a 200 with non-approved result surfaces status."""
+    from pyrh.exceptions import AuthenticationError
+
+    body = {"type_context": {"result": "workflow_status_denied"}}
+    resp = _mock_response(200)
+    resp.text = '{"type_context": {"result": "workflow_status_denied"}}'
+    with mock.patch.object(sm, "post", return_value=(body, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._user_view_post("m-123")
+    # 200 is an HTTP status, still embedded in the message for trace clarity.
+    assert "200" in str(exc_info.value)
+
+
+def test_logout_http_error_chains_cause_and_status(sm):
+    """Regression: `logout()` must wrap HTTPError into AuthenticationError
+    with `__cause__` set AND the status code embedded in the message."""
+    from requests.exceptions import HTTPError
+
+    from pyrh.exceptions import AuthenticationError
+
+    # Build a synthetic HTTPError carrying a 503 response.
+    fake_res = mock.Mock()
+    fake_res.status_code = 503
+    fake_res.text = "service unavailable"
+    http_err = HTTPError("logout failed")
+    http_err.response = fake_res
+
+    sm.oauth.refresh_token = "some_refresh_token"
+    with mock.patch.object(sm, "post", side_effect=http_err):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm.logout()
+
+    assert exc_info.value.__cause__ is http_err
+    assert "503" in str(exc_info.value)
+
+
+def test_challenge_oauth2_http_error_chains_cause_and_status(sm, monkeypatch):
+    """`_challenge_oauth2` must chain HTTPError on the finalize-token path.
+
+    The old code did `raise AuthenticationError(...)` inside `except HTTPError`
+    without `from e`, so callers lost the underlying HTTP context. With the
+    fix, both `__cause__` and the status code are observable.
+    """
+    import uuid
+
+    from requests.exceptions import HTTPError
+
+    from pyrh.exceptions import AuthenticationError
+    from pyrh.models.oauth import OAuth
+
+    monkeypatch.setattr("builtins.input", lambda: "654321")
+
+    incoming = OAuth()
+    incoming.challenge = mock.Mock()
+    incoming.challenge.id = uuid.uuid4()
+    incoming.challenge.type = "email"
+    incoming.challenge.remaining_attempts = 3
+    incoming.challenge.remaining_retries = 3
+
+    fake_res = mock.Mock()
+    fake_res.status_code = 500
+    fake_res.text = "final post blew up"
+    http_err = HTTPError("final post blew up")
+    http_err.response = fake_res
+
+    call_count = {"n": 0}
+
+    def post_side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ({}, _mock_response(200))
+        raise http_err
+
+    with mock.patch.object(sm, "post", side_effect=post_side_effect):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._challenge_oauth2(incoming, {"p": 1})
+
+    assert exc_info.value.__cause__ is http_err
+    assert "500" in str(exc_info.value)

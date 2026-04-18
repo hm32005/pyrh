@@ -43,6 +43,20 @@ HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(robinhood_headers)
 """Headers used when performing requests with robinhood api."""
 
 
+def _truncate_body(res: Any, limit: int = 200) -> str:
+    """Return a safely-truncated representation of a response body for logging.
+
+    Extracts ``res.text`` if it is a string and truncates it to ``limit``
+    characters. Returns ``""`` for Mock objects, missing attrs, or anything
+    non-string — this keeps error messages clean and predictable across real
+    ``requests.Response`` objects and test doubles.
+    """
+    text = getattr(res, "text", "")
+    if not isinstance(text, str):
+        return ""
+    return text[:limit]
+
+
 class SessionManager(BaseModel):
     """Manage connectivity with Robinhood API.
 
@@ -193,8 +207,13 @@ class SessionManager(BaseModel):
                         schema=OAuthSchema(),
                     ),
                 )
-            except HTTPError:
-                raise AuthenticationError("Error in finalizing auth token")
+            except HTTPError as e:
+                err_res = getattr(e, "response", None)
+                status = getattr(err_res, "status_code", "?")
+                raise AuthenticationError(
+                    f"Error in finalizing auth token: status={status} "
+                    f"body={_truncate_body(err_res)}"
+                ) from e
         elif oauth_inner.is_challenge and oauth_inner.challenge.can_retry:
             print("Invalid code entered")
             return self._challenge_oauth2(oauth, oauth_payload)
@@ -584,7 +603,10 @@ class SessionManager(BaseModel):
             return data["id"]
         else:
             self.logger.info(res.status_code)
-            raise AuthenticationError("User Machine Error")
+            raise AuthenticationError(
+                f"User Machine Error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
 
     def _poll_prompt_approval(self, challenge_id, timeout=120, interval=5):
         """Poll /push/{challenge_id}/get_prompts_status/ for device approval.
@@ -654,7 +676,10 @@ class SessionManager(BaseModel):
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("User View Error")
-            raise AuthenticationError("User View Error")
+            raise AuthenticationError(
+                f"User View Error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
         sheriff_challenge = data["context"]["sheriff_challenge"]
         challenge_id = sheriff_challenge["id"]
         challenge_type = sheriff_challenge.get("type", "sms")
@@ -678,7 +703,10 @@ class SessionManager(BaseModel):
         ):
             return True
         else:
-            raise AuthenticationError("User View Error")
+            raise AuthenticationError(
+                f"User View Error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            )
         return False
 
     @property
@@ -762,8 +790,12 @@ class SessionManager(BaseModel):
             self.post(urls.OAUTH_REVOKE, data=logout_payload, auto_login=False)
             self.oauth = OAuth()
             self.session.headers.pop("Authorization", None)
-        except HTTPError:
-            raise AuthenticationError("Could not log out")
+        except HTTPError as e:
+            err_res = getattr(e, "response", None)
+            status = getattr(err_res, "status_code", "?")
+            raise AuthenticationError(
+                f"Could not log out: status={status} body={_truncate_body(err_res)}"
+            ) from e
 
     @property
     def token_expired(self) -> bool:

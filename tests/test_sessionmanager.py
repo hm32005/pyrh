@@ -404,7 +404,10 @@ def test_logout_failure(post_mock, sm):
     assert sm.oauth.access_token == "some_token"
     assert sm.oauth.refresh_token == "some_refresh_token"
     assert post_mock.call_count == 1
-    assert "Could not log out" == str(e.value)
+    assert "Could not log out" in str(e.value)
+    # Silent-failure hardening: the wrapped AuthenticationError must preserve
+    # the original HTTPError in __cause__ for observability.
+    assert isinstance(e.value.__cause__, HTTPError)
 
 
 def test_jsonify(tmpdir, sm):
