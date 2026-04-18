@@ -1117,6 +1117,88 @@ def test_refresh_oauth2_http_500_raises_auth_error(sm):
         sm._refresh_oauth2()
 
 
+def test_mfa_login_workflow_prompt_flow_integration(sm):
+    """Integration-style test of the device-prompt MFA path: exercises the
+    real POST -> POST -> GET -> GET -> POST -> POST HTTP chain without
+    mocking any of the internal helpers.
+
+    This covers the gap flagged in review 4133341580 (Medium —
+    'over-mocked integration gap'): individual unit tests patch every
+    collaborator, so nothing exercises the real cross-method contract.
+    """
+    from pyrh import urls
+    from pyrh.models.oauth import OAuth
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("https://", adapter)
+
+    # 1. First OAUTH POST -> 403 with workflow_id
+    # 2. Second OAUTH POST -> 200 with tokens (after MFA)
+    oauth_responses = [
+        {
+            "json": {"verification_workflow": {"id": "wf-42"}},
+            "status_code": 403,
+        },
+        {
+            "json": {
+                "access_token": "final_at",
+                "refresh_token": "final_rt",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "internal",
+            },
+            "status_code": 200,
+        },
+    ]
+    adapter.register_uri("POST", str(urls.OAUTH), oauth_responses)
+
+    # _user_machine_request -> 200 with id
+    adapter.register_uri(
+        "POST",
+        str(urls.USER_MACHINE),
+        json={"id": "machine-7"},
+        status_code=200,
+    )
+
+    # _user_view_get -> 200 with prompt sheriff_challenge
+    user_view_url = str(urls.INQUIRIES / "machine-7/user_view/")
+    adapter.register_uri(
+        "GET",
+        user_view_url,
+        json={
+            "context": {
+                "sheriff_challenge": {"id": "chal-9", "type": "prompt"}
+            }
+        },
+        status_code=200,
+    )
+
+    # _poll_prompt_approval GET -> 200 validated
+    prompt_url = str(urls.PUSH_PROMPT_STATUS / "chal-9/get_prompts_status/")
+    adapter.register_uri(
+        "GET",
+        prompt_url,
+        json={"challenge_status": "validated"},
+        status_code=200,
+    )
+
+    # _user_view_post -> 200 approved
+    adapter.register_uri(
+        "POST",
+        user_view_url,
+        json={"type_context": {"result": "workflow_status_approved"}},
+        status_code=200,
+    )
+
+    with mock.patch("time.sleep", return_value=None):
+        sm._login_oauth2()
+
+    assert sm.session.headers["Authorization"] == "Bearer final_at"
+    assert isinstance(sm.oauth, OAuth)
+    assert sm.oauth.access_token == "final_at"
+    assert sm.oauth.refresh_token == "final_rt"
+
+
 def test_refresh_oauth2_no_refresh_token_raises(sm):
     """When the stored oauth has no refresh_token, the pre-flight guard
     raises AuthenticationError before any HTTP call is made."""
