@@ -44,3 +44,33 @@ def test_oauth_test_attrs():
     oa.access_token = "some-token"
     oa.refresh_token = "other-token"
     assert oa.is_valid
+
+
+@freeze_time("2020-01-01")
+def test_oauth_init_derives_expires_in_from_expires_at():
+    """Passing expires_at to OAuth() causes expires_in to be the diff in seconds."""
+    import pendulum
+
+    from pyrh.models.oauth import OAuth
+
+    future = pendulum.datetime(2020, 1, 2, tz="UTC")
+    oauth = OAuth(access_token="t", refresh_token="r", expires_at=future)
+
+    # Exactly 24 hours from the frozen now.
+    assert oauth.expires_in == 86400
+    assert oauth.access_token == "t"
+    assert oauth.refresh_token == "r"
+
+
+def test_oauth_init_does_not_log_token_values_at_info(caplog):
+    """Guardrail: OAuth() must not emit access_token / refresh_token values at INFO or higher."""
+    import logging
+
+    from pyrh.models.oauth import OAuth
+
+    caplog.set_level(logging.INFO, logger="pyrh.models.oauth")
+    OAuth(access_token="SECRET_AT", refresh_token="SECRET_RT")
+
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "SECRET_AT" not in joined
+    assert "SECRET_RT" not in joined

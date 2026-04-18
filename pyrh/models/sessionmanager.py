@@ -94,7 +94,14 @@ class SessionManager(BaseModel):
         self.__logger.info("MFA Done!")
         self.session: requests.Session = requests.session()
         self.__logger.info("Session done!")
-        self.session.headers = HEADERS if headers is None else headers
+        # Always copy so the module-level HEADERS dict (and any caller-supplied
+        # dict) is never mutated by per-session header changes like
+        # Authorization. See coverage pass 2026-04-17 — this surfaced as
+        # cross-test leakage of `Authorization: Bearer ...` between
+        # SessionManager instances.
+        self.session.headers = CaseInsensitiveDict(
+            HEADERS if headers is None else headers
+        )
         self.__logger.info("Headers done!")
         self.session.proxies = getproxies() if proxies is None else proxies
         self.__logger.info("Proxies done!")
