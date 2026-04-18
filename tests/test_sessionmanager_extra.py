@@ -774,16 +774,20 @@ def test_poll_prompt_approval_issued_then_validated(_sleep, sm):
 
 
 @mock.patch("time.sleep", return_value=None)
-def test_poll_prompt_approval_swallows_generic_exception(_sleep, sm):
-    """Non-Auth exceptions inside the poll are logged and the loop continues."""
-    from pyrh.exceptions import AuthenticationError
+def test_poll_prompt_approval_generic_exception_propagates(_sleep, sm):
+    """Non-network exceptions (shape / programming errors) propagate unchanged.
 
-    def boom_then_timeout(*a, **kw):
+    Regression: before the silent-failure fix, the poll body swallowed every
+    Exception, turning bugs into misleading timeouts. The narrowed
+    `except requests.RequestException` means a RuntimeError bubbles out so
+    operators see the real cause.
+    """
+
+    def boom(*a, **kw):
         raise RuntimeError("transient")
 
-    with mock.patch.object(sm, "get", side_effect=boom_then_timeout):
-        # timeout is 5, interval 5: one iteration runs, then raises AuthError on timeout
-        with pytest.raises(AuthenticationError, match="timed out"):
+    with mock.patch.object(sm, "get", side_effect=boom):
+        with pytest.raises(RuntimeError, match="transient"):
             sm._poll_prompt_approval("c-1", timeout=5, interval=5)
 
 
@@ -795,6 +799,61 @@ def test_poll_prompt_approval_non_200_continues_until_timeout(_sleep, sm):
     with mock.patch.object(sm, "get", return_value=({}, _mock_response(500))):
         with pytest.raises(AuthenticationError, match="timed out"):
             sm._poll_prompt_approval("c-1", timeout=5, interval=5)
+
+
+@mock.patch("time.sleep", return_value=None)
+def test_poll_prompt_approval_request_exception_retries_then_raises(_sleep, sm):
+    """Three consecutive `requests.RequestException` polls must surface as
+    AuthenticationError with the original exception chained via __cause__.
+
+    Regression for the previous broad `except Exception` that silently
+    converted every transport failure into a timeout.
+    """
+    import requests
+
+    from pyrh.exceptions import AuthenticationError
+
+    connection_error = requests.ConnectionError("network is unreachable")
+    with mock.patch.object(sm, "get", side_effect=connection_error):
+        with pytest.raises(AuthenticationError, match="3 consecutive") as exc_info:
+            # 3 intervals @ 5s within a 15s timeout hits the threshold.
+            sm._poll_prompt_approval("c-1", timeout=15, interval=5)
+
+    assert exc_info.value.__cause__ is connection_error
+
+
+@mock.patch("time.sleep", return_value=None)
+def test_poll_prompt_approval_json_decode_error_propagates(_sleep, sm):
+    """A malformed JSON body (raises `json.JSONDecodeError`) must NOT be
+    swallowed by the poll loop. The decoded error should surface so the
+    operator can see exactly what Robinhood returned."""
+    import json
+
+    def bad_json(*a, **kw):
+        raise json.JSONDecodeError("Expecting value", "garbage", 0)
+
+    with mock.patch.object(sm, "get", side_effect=bad_json):
+        with pytest.raises(json.JSONDecodeError):
+            sm._poll_prompt_approval("c-1", timeout=5, interval=5)
+
+
+@mock.patch("time.sleep", return_value=None)
+def test_poll_prompt_approval_request_exception_resets_on_success(_sleep, sm):
+    """One transient request failure followed by a success must reset the
+    consecutive-failure counter so the session isn't abandoned on a blip."""
+    import requests
+
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.ConnectionError("blip")
+        # Second iteration: success, validated.
+        return ({"challenge_status": "validated"}, _mock_response(200))
+
+    with mock.patch.object(sm, "get", side_effect=flaky):
+        assert sm._poll_prompt_approval("c-1", timeout=30, interval=5) is True
 
 
 # ---------------------------------------------------------------------------

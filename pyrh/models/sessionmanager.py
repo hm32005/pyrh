@@ -598,7 +598,15 @@ class SessionManager(BaseModel):
             True when the challenge_status is ``"validated"``.
 
         Raises:
-            AuthenticationError: If the challenge is denied, expired, or times out.
+            AuthenticationError: If the challenge is denied, expired, times out,
+                or if the poll endpoint raises ``requests.RequestException`` on
+                three consecutive attempts.
+
+        Notes:
+            Only network-layer failures (``requests.RequestException``) are
+            retried. Shape errors (``KeyError``, ``json.JSONDecodeError``, etc.)
+            propagate unchanged so the operator sees the real cause instead of
+            a misleading timeout.
         """
         import time
 
@@ -606,6 +614,7 @@ class SessionManager(BaseModel):
             urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/"
         )
         elapsed = 0
+        consecutive_failures = 0
         while elapsed < timeout:
             time.sleep(interval)
             elapsed += interval
@@ -616,17 +625,26 @@ class SessionManager(BaseModel):
                     auto_login=False,
                     return_response=True,
                 )
-                if res.status_code == 200:
-                    status = data.get("challenge_status", "unknown")
-                    self.logger.info(f"Prompt status: {status} ({elapsed}s)")
-                    if status == "validated":
-                        return True
-                    if status in ("denied", "expired"):
-                        raise AuthenticationError(f"Device approval {status}")
-            except AuthenticationError:
-                raise
-            except Exception as e:
-                self.logger.error(f"Prompt poll error: {e}")
+            except requests.RequestException as e:
+                consecutive_failures += 1
+                self.logger.error(
+                    f"Prompt poll network error "
+                    f"({consecutive_failures}/3): {e}"
+                )
+                if consecutive_failures >= 3:
+                    raise AuthenticationError(
+                        f"Prompt polling failed after 3 consecutive errors: {e}"
+                    ) from e
+                continue
+            # Reset the consecutive-failure counter on any non-raising request.
+            consecutive_failures = 0
+            if res.status_code == 200:
+                status = data.get("challenge_status", "unknown")
+                self.logger.info(f"Prompt status: {status} ({elapsed}s)")
+                if status == "validated":
+                    return True
+                if status in ("denied", "expired"):
+                    raise AuthenticationError(f"Device approval {status}")
         raise AuthenticationError(f"Device approval timed out after {timeout}s")
 
     def _user_view_get(self, machine_id):
