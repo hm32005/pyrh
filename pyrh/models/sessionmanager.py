@@ -375,7 +375,7 @@ class SessionManager(BaseModel):
         else:
             self._configure_manager(oauth)
 
-    def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth | None:
+    def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth:
         machine_id = self._user_machine_request(workflow_id)
         challenge_id, challenge_type = self._user_view_get(machine_id)
         self.logger.info(
@@ -397,8 +397,11 @@ class SessionManager(BaseModel):
             if not self._challenge_response(challenge_id, mfa_code):
                 raise AuthenticationError("Challenge response was not validated")
 
-        if self._user_view_post(machine_id):
-            return self._mfa_oauth2(oauth_payload, OAuthSchema())
+        if not self._user_view_post(machine_id):
+            raise AuthenticationError(
+                "User View POST was not approved; MFA login workflow aborted."
+            )
+        return self._mfa_oauth2(oauth_payload, OAuthSchema())
 
     def _mfa_oauth2(
         self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3

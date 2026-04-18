@@ -537,8 +537,15 @@ def test_mfa_login_workflow_challenge_rejected_raises(sm):
             sm._mfa_login_workflow("wf-1", {"p": 1})
 
 
-def test_mfa_login_workflow_user_view_post_false_returns_none(sm):
-    """When _user_view_post returns False, _mfa_login_workflow falls off the end -> None."""
+def test_mfa_login_workflow_user_view_post_false_raises_auth_error(sm):
+    """Regression: previously when _user_view_post returned False the method
+    fell off the end returning None, and the caller `_login_oauth2` then did
+    `.is_valid` on None raising AttributeError — which masked the real auth
+    denial. The fix replaces the implicit fall-through with an explicit
+    AuthenticationError so callers see the actual authn failure cause.
+    """
+    from pyrh.exceptions import AuthenticationError
+
     with (
         mock.patch.object(sm, "_user_machine_request", return_value="m-1"),
         mock.patch.object(sm, "_user_view_get", return_value=("c-1", "prompt")),
@@ -546,9 +553,11 @@ def test_mfa_login_workflow_user_view_post_false_returns_none(sm):
         mock.patch.object(sm, "_user_view_post", return_value=False),
         mock.patch.object(sm, "_mfa_oauth2") as mfa_final,
     ):
-        result = sm._mfa_login_workflow("wf-1", {"p": 1})
+        with pytest.raises(
+            AuthenticationError, match="User View POST was not approved"
+        ):
+            sm._mfa_login_workflow("wf-1", {"p": 1})
 
-    assert result is None
     mfa_final.assert_not_called()
 
 
