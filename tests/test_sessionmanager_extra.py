@@ -724,6 +724,42 @@ def _auth_error_with_status(msg, status_code):
     return err
 
 
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_is_permanent_refresh_failure_classifies_transient_4xx_as_transient(status):
+    """408 Request Timeout, 425 Too Early, 429 Too Many Requests are 4xx
+    semantically but caused by throttling / timing — the refresh token is
+    fine, the server wants a backoff. Must classify as transient so callers
+    fall back / retry instead of killing the session.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #6.
+    """
+    from pyrh.models.sessionmanager import _is_permanent_refresh_failure
+
+    err = _auth_error_with_status("throttled", status)
+    assert _is_permanent_refresh_failure(err) is False
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 418])
+def test_is_permanent_refresh_failure_classifies_other_4xx_as_permanent(status):
+    """The non-transient 4xx codes are real client errors — revoked token,
+    wrong credentials, invalid grant — and MUST be permanent so the caller
+    surfaces the auth denial instead of fighting a retry loop."""
+    from pyrh.models.sessionmanager import _is_permanent_refresh_failure
+
+    err = _auth_error_with_status("revoked", status)
+    assert _is_permanent_refresh_failure(err) is True
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_is_permanent_refresh_failure_classifies_5xx_as_transient(status):
+    """5xx is upstream-side: retry / fall back to interactive login."""
+    from pyrh.models.sessionmanager import _is_permanent_refresh_failure
+
+    err = _auth_error_with_status("upstream sad", status)
+    assert _is_permanent_refresh_failure(err) is False
+
+
 def test_login_no_auth_oauth_transient_refresh_fails_falls_back_to_relogin(sm):
     """Transient (5xx) refresh failure falls back to _login_oauth2 when creds present."""
     sm.oauth.access_token = "at"

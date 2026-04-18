@@ -77,6 +77,14 @@ def _is_permanent_refresh_failure(err: Exception) -> bool:
     status = getattr(err, "status_code", None)
     if status is None:
         return True
+    # 408 Request Timeout, 425 Too Early, 429 Too Many Requests are 4xx in
+    # range but semantically transient — the refresh token itself is fine, the
+    # server just wants us to back off. Treat as transient so the caller can
+    # fall back to a fresh login (or retry) rather than dying on a throttling
+    # spike.
+    _TRANSIENT_4XX = {408, 425, 429}
+    if int(status) in _TRANSIENT_4XX:
+        return False
     # 4xx → permanent; 5xx → transient; anything else → treat as permanent.
     return 400 <= int(status) < 500
 
