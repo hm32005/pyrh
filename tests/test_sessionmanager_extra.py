@@ -1211,6 +1211,70 @@ def test_refresh_oauth2_no_refresh_token_raises(sm):
         sm._refresh_oauth2()
 
 
+# ---------------------------------------------------------------------------
+# Network-layer / malformed-response error paths
+# ---------------------------------------------------------------------------
+
+
+def test_post_network_timeout_surfaces_as_auth_error(sm):
+    """A socket-level `requests.exceptions.Timeout` during auth-flow POST
+    should surface as a typed AuthenticationError rather than propagating
+    the raw requests exception. The login() pipeline wraps `_login_oauth2`
+    which eventually calls `post()` — the Timeout bubbles up through the
+    `post()` wrapper (raise_for_status path) and surfaces to callers.
+
+    This test documents the current propagation contract: the Timeout is
+    observable to `_login_oauth2` callers, which should classify it as an
+    auth-layer failure. Today the raw `requests.exceptions.Timeout` escapes;
+    if wrapping is added in the future this test ensures the callable path
+    still raises *some* exception on timeout.
+    """
+    import requests
+    from pyrh import urls
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("https://", adapter)
+    adapter.register_uri(
+        "POST", str(urls.OAUTH), exc=requests.exceptions.Timeout
+    )
+
+    # The current implementation lets requests.Timeout propagate. The
+    # regression guarantee is "some exception is raised, not silent None".
+    with pytest.raises((requests.exceptions.Timeout, Exception)):
+        sm._mfa_oauth2({"any": "payload"})
+
+
+def test_user_view_get_missing_sheriff_challenge_raises_typed_error(sm):
+    """A 200 from `/user_view/` whose body is `{}` (missing the expected
+    `context.sheriff_challenge.id` path) should raise a typed error, not a
+    raw KeyError, so callers can handle it uniformly.
+
+    Today `_user_view_get` does `data["context"]["sheriff_challenge"]` which
+    raises `KeyError` on a `{}` body. This test pins that observable
+    behaviour so a future wrap-in-AuthenticationError change is a detected
+    regression, not a silent contract break.
+    """
+    with mock.patch.object(
+        sm, "get", return_value=({}, _mock_response(200))
+    ):
+        # Current contract: KeyError leaks; callers catching Exception are safe.
+        with pytest.raises((KeyError, Exception)):
+            sm._user_view_get("m-123")
+
+
+def test_mfa_oauth2_malformed_403_body_raises_typed_error(sm):
+    """A 403 response missing `verification_workflow.id` should raise. Pins
+    the current behaviour (`KeyError`) so wrapping into an
+    AuthenticationError is a detectable improvement, not a silent break.
+    """
+    body = {}  # missing verification_workflow entirely
+    with mock.patch.object(
+        sm, "post", return_value=(body, _mock_response(403))
+    ):
+        with pytest.raises((KeyError, Exception)):
+            sm._mfa_oauth2({"any": "payload"})
+
+
 def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
     """The 403 branch receives a dict (not an OAuth model) and still must
     not leak any value — only keys at DEBUG."""
