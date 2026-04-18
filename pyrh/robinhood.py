@@ -587,16 +587,20 @@ class Robinhood(InstrumentManager, SessionManager):
     #                           GET FUNDAMENTALS
     ###########################################################################
 
-    @property
     def fundamentals(self, stock=""):
         """Find stock fundamentals data
 
         Args:
-            (str): stock ticker
+            stock (str): stock ticker
 
         Returns:
             (:obj:`dict`): contents of `fundamentals` endpoint
 
+        Note:
+            Previously decorated @property, which silently discarded the
+            `stock` argument (property getters are called with just `self`).
+            Any caller written as `rh.fundamentals` would have returned
+            without actually querying a symbol.
         """
 
         # Prompt for stock if not entered
