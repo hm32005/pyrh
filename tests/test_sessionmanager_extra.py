@@ -24,6 +24,7 @@ import pendulum
 import pytest
 import requests_mock as requests_mock_lib
 from freezegun import freeze_time
+from requests.structures import CaseInsensitiveDict
 
 
 MOCK_URL = "mock://test.com"
@@ -110,7 +111,6 @@ def test_init_accepts_explicit_oauth_and_computes_expires_at():
 
 def test_init_accepts_custom_headers_and_proxies():
     from pyrh.models import SessionManager
-    from requests.structures import CaseInsensitiveDict
 
     headers = CaseInsensitiveDict({"X-Custom": "foo"})
     proxies = {"http": "http://proxy.example.com:8080"}
@@ -304,8 +304,6 @@ def test_get_with_custom_headers(sm):
     sm.session.mount("mock", adapter)
     adapter.register_uri("GET", MOCK_URL, text='{"ok": true}', status_code=200)
 
-    from requests.structures import CaseInsensitiveDict
-
     headers = CaseInsensitiveDict({"X-Custom-Header": "yes"})
     body = sm.get(MOCK_URL, headers=headers, auto_login=False)
     assert body == {"ok": True}
@@ -316,8 +314,6 @@ def test_post_with_custom_headers(sm):
     adapter = requests_mock_lib.Adapter()
     sm.session.mount("mock", adapter)
     adapter.register_uri("POST", MOCK_URL, text='{"ok": true}', status_code=200)
-
-    from requests.structures import CaseInsensitiveDict
 
     headers = CaseInsensitiveDict({"X-Something": "yes"})
     body = sm.post(
@@ -1012,3 +1008,58 @@ def test_session_manager_schema_load_with_expires_at():
     # marshmallow deserialises to a datetime; SessionManager.expires_at is
     # either pendulum or plain datetime here, just compare the key instant.
     assert getattr(sm.expires_at, "year") == 2099
+
+
+# ---------------------------------------------------------------------------
+# Security regression tests — token values must never appear in log records
+# ---------------------------------------------------------------------------
+
+
+def test_mfa_oauth2_does_not_log_token_values_at_info(sm, caplog):
+    """Regression: on the 200 success path of _mfa_oauth2, the OAuth object
+    must not be dumped via __dict__ or any other mechanism that exposes
+    access_token / refresh_token into log records at any level.
+
+    Companion to test_oauth_init_does_not_log_token_values_at_info — this one
+    guards the call site at sessionmanager.py:_mfa_oauth2, which previously
+    emitted `f"_mfa_oauth2 oauth dict: {oauth.__dict__}"` at INFO.
+    """
+    import logging
+
+    from pyrh.models.oauth import OAuth, OAuthSchema
+
+    oauth = OAuth()
+    oauth.access_token = "SECRET_AT"
+    oauth.refresh_token = "SECRET_RT"
+    oauth.expires_in = 3600
+
+    caplog.set_level(logging.DEBUG, logger="pyrh.models.sessionmanager")
+    with mock.patch.object(
+        sm, "post", return_value=(oauth, _mock_response(200))
+    ):
+        sm._mfa_oauth2({"any": "payload"}, schema=OAuthSchema())
+
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "SECRET_AT" not in joined
+    assert "SECRET_RT" not in joined
+
+
+def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
+    """The 403 branch receives a dict (not an OAuth model) and still must
+    not leak any value — only keys at DEBUG."""
+    import logging
+
+    body = {
+        "verification_workflow": {"id": "wf-42"},
+        "access_token": "SHOULD_NOT_APPEAR",
+    }
+    caplog.set_level(logging.DEBUG, logger="pyrh.models.sessionmanager")
+    with mock.patch.object(
+        sm, "post", return_value=(body, _mock_response(403))
+    ):
+        sm._mfa_oauth2({"any": "payload"})
+
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "SHOULD_NOT_APPEAR" not in joined
+    # the new redacted DEBUG log still captures the shape for operators
+    assert "_mfa_oauth2 result type=" in joined

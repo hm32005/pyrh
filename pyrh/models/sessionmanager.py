@@ -415,10 +415,14 @@ class SessionManager(BaseModel):
         self.logger.info("_mfa_oauth2 posted request!")
         attempts -= 1
         self.logger.info(f"_mfa_oauth2 status_code: {res.status_code}")
-        if isinstance(oauth, dict):
-            self.logger.info(f"_mfa_oauth2 oauth keys: {oauth.keys()}")
-        else:
-            self.logger.info(f"_mfa_oauth2 oauth dict: {oauth.__dict__}")
+        # Redact OAuth payload values: never log __dict__ or keys() values at INFO,
+        # as the 200-branch `oauth` is an OAuth model carrying access_token /
+        # refresh_token as attributes, identical leak class to bd227b3.
+        self.logger.debug(
+            "_mfa_oauth2 result type=%s keys=%s",
+            type(oauth).__name__,
+            sorted(vars(oauth) if hasattr(oauth, "__dict__") else oauth),
+        )
         self.logger.debug("_mfa_oauth2 status=%s", res.status_code)
         if res.status_code == 403:
             workflow_id = oauth["verification_workflow"]["id"]
