@@ -454,9 +454,7 @@ def test_get_401_retry_raises_if_bearer_not_rotated(sm):
 
     adapter = requests_mock_lib.Adapter()
     sm.session.mount("mock", adapter)
-    adapter.register_uri(
-        "GET", MOCK_URL, text='{"detail": "expired"}', status_code=401
-    )
+    adapter.register_uri("GET", MOCK_URL, text='{"detail": "expired"}', status_code=401)
 
     sm.session.headers["Authorization"] = "Bearer STALE"
 
