@@ -14,7 +14,9 @@ def test_challenge_can_retry():
 
     future = datetime.strptime("2020-01-02", "%Y-%m-%d").replace(tzinfo=pytz.UTC)
 
-    data = {"expires_at": future}
+    # The ChallengeSchema field is `expires_in` (AwareDateTime), and
+    # can_retry compares against `self.expires_in`.
+    data = {"expires_in": future}
 
     challenge = Challenge(**data)
 
@@ -23,7 +25,7 @@ def test_challenge_can_retry():
     challenge.remaining_attempts = 1
     assert challenge.can_retry
 
-    challenge.expires_at = future - timedelta(days=3)
+    challenge.expires_in = future - timedelta(days=3)
 
     assert not challenge.can_retry
 
