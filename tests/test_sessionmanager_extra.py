@@ -1059,6 +1059,76 @@ def test_mfa_oauth2_does_not_log_token_values_at_info(sm, caplog):
     assert "SECRET_RT" not in joined
 
 
+# ---------------------------------------------------------------------------
+# _refresh_oauth2 — real coverage via requests_mock (not helper-patched)
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_oauth2_success_configures_manager(sm):
+    """200 from the oauth token endpoint updates the Authorization header and
+    populates expires_at via `_configure_manager`. Exercises the real
+    `_refresh_oauth2` -> `post` -> schema.load path without mocking helpers.
+    """
+    from pyrh import urls
+
+    sm.oauth.access_token = "old_at"
+    sm.oauth.refresh_token = "old_rt"
+
+    new_body = {
+        "access_token": "refreshed_at",
+        "refresh_token": "refreshed_rt",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+        "scope": "internal",
+    }
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("https://", adapter)
+    adapter.register_uri(
+        "POST", str(urls.OAUTH), json=new_body, status_code=200
+    )
+
+    sm._refresh_oauth2()
+
+    assert sm.session.headers["Authorization"] == "Bearer refreshed_at"
+    assert sm.oauth.access_token == "refreshed_at"
+    assert sm.oauth.refresh_token == "refreshed_rt"
+
+
+def test_refresh_oauth2_http_500_raises_auth_error(sm):
+    """Non-200 (or invalid-oauth) response from the refresh endpoint raises
+    AuthenticationError. Exercises the warning + raise branch."""
+    from pyrh import urls
+    from pyrh.exceptions import AuthenticationError
+
+    sm.oauth.access_token = "old_at"
+    sm.oauth.refresh_token = "old_rt"
+
+    adapter = requests_mock_lib.Adapter()
+    sm.session.mount("https://", adapter)
+    adapter.register_uri(
+        "POST",
+        str(urls.OAUTH),
+        json={"detail": "invalid_grant", "error": "refresh_failed"},
+        status_code=500,
+    )
+
+    with pytest.raises(AuthenticationError, match="Failed to refresh token"):
+        sm._refresh_oauth2()
+
+
+def test_refresh_oauth2_no_refresh_token_raises(sm):
+    """When the stored oauth has no refresh_token, the pre-flight guard
+    raises AuthenticationError before any HTTP call is made."""
+    from pyrh.exceptions import AuthenticationError
+
+    # A fresh OAuth() has no access_token / refresh_token attrs -> is_valid
+    # evaluates False and the guard at the top of _refresh_oauth2 fires.
+    assert not sm.oauth.is_valid
+    with pytest.raises(AuthenticationError, match="No refresh token available"):
+        sm._refresh_oauth2()
+
+
 def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
     """The 403 branch receives a dict (not an OAuth model) and still must
     not leak any value — only keys at DEBUG."""
