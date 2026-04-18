@@ -1478,14 +1478,45 @@ def test_user_view_get_missing_sheriff_challenge_raises_typed_error(sm):
 
 
 def test_mfa_oauth2_malformed_403_body_raises_typed_error(sm):
-    """A 403 response missing `verification_workflow.id` should raise. Pins
-    the current behaviour (`KeyError`) so wrapping into an
-    AuthenticationError is a detectable improvement, not a silent break.
+    """A 403 response missing `verification_workflow.id` must raise
+    ``AuthenticationError("Malformed 403 body: …")`` — not a raw KeyError —
+    so callers catch one exception class uniformly.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #4.
     """
+    from pyrh.exceptions import AuthenticationError
+
     body = {}  # missing verification_workflow entirely
-    with mock.patch.object(sm, "post", return_value=(body, _mock_response(403))):
-        with pytest.raises((KeyError, Exception)):
+    resp = _mock_response(403)
+    resp.text = "verification blob lost in transit"
+    with mock.patch.object(sm, "post", return_value=(body, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
             sm._mfa_oauth2({"any": "payload"})
+    assert "Malformed 403 body" in str(exc_info.value)
+    assert "verification blob lost in transit" in str(exc_info.value)
+    # Original KeyError chains via __cause__ for diagnostics.
+    assert isinstance(exc_info.value.__cause__, (KeyError, TypeError))
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_mfa_oauth2_5xx_raises_with_status(sm, status):
+    """Regression: a 5xx / 429 must surface the real HTTP status instead of
+    recursing into the "Invalid mfa code" retry loop. The user's MFA code is
+    not the cause of a 503 — showing a wrong-code retry would mask it."""
+    from pyrh.exceptions import AuthenticationError
+
+    resp = _mock_response(status)
+    resp.text = "upstream maintenance window"
+    # `post()` returns (data, res) on `return_response=True`; here _mfa_oauth2
+    # is invoked directly so we stub `post` at the method boundary rather
+    # than the HTTP layer (the adapter would re-parse JSON).
+    with mock.patch.object(sm, "post", return_value=({}, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._mfa_oauth2({"any": "payload"})
+    msg = str(exc_info.value)
+    assert f"status={status}" in msg
+    assert "upstream maintenance window" in msg
 
 
 def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):

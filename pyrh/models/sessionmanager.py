@@ -494,8 +494,28 @@ class SessionManager(BaseModel):
         )
         self.logger.debug("_mfa_oauth2 status=%s", res.status_code)
         if res.status_code == 403:
-            workflow_id = oauth["verification_workflow"]["id"]
+            # A 403 should carry a verification_workflow.id under the body,
+            # but a malformed proxy / edge response can drop the shape. Wrap
+            # so the operator sees "Malformed 403 body: …" instead of a raw
+            # KeyError that masks the real authentication stage.
+            try:
+                workflow_id = oauth["verification_workflow"]["id"]
+            except (KeyError, TypeError) as e:
+                raise AuthenticationError(
+                    f"Malformed 403 body: {_truncate_body(res)}"
+                ) from e
             return workflow_id
+
+        # Transport / upstream failures must NOT be retried with "Invalid mfa
+        # code" — the user's MFA code is fine, the server is sick. Surface
+        # the real status so the operator doesn't chase a phantom wrong-code
+        # loop.
+        _TRANSPORT_STATUSES = {429, 500, 502, 503, 504}
+        if res.status_code in _TRANSPORT_STATUSES:
+            raise AuthenticationError(
+                f"OAuth transport error: status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            ) from None
 
         if res.status_code != requests.codes.ok and attempts > 0:
             self.logger.error("Invalid mfa code")
