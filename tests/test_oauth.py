@@ -68,7 +68,10 @@ def test_oauth_init_does_not_log_token_values_at_info(caplog):
 
     from pyrh.models.oauth import OAuth
 
-    caplog.set_level(logging.INFO, logger="pyrh.models.oauth")
+    # DEBUG-level capture is required: the fix's stated guarantee is that
+    # tokens never appear in any log record at any level. INFO-only capture
+    # would silently miss a regression that logs tokens at DEBUG.
+    caplog.set_level(logging.DEBUG, logger="pyrh.models.oauth")
     OAuth(access_token="SECRET_AT", refresh_token="SECRET_RT")
 
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
