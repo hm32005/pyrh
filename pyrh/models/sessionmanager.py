@@ -50,10 +50,28 @@ def _truncate_body(res: Any, limit: int = 200) -> str:
     characters. Returns ``""`` for Mock objects, missing attrs, or anything
     non-string — this keeps error messages clean and predictable across real
     ``requests.Response`` objects and test doubles.
+
+    For binary Content-Types (e.g. image/png, application/octet-stream) the
+    body is NOT emitted — we return a ``<N bytes binary>`` size marker
+    instead. This avoids dumping raw bytes into log messages and error
+    strings, which tends to corrupt terminals and bloats error messages.
     """
     text = getattr(res, "text", "")
     if not isinstance(text, str):
         return ""
+    headers = getattr(res, "headers", {}) or {}
+    content_type = ""
+    try:
+        content_type = headers.get("Content-Type", "") or ""
+    except AttributeError:
+        content_type = ""
+    if content_type and not content_type.startswith(("text/", "application/json")):
+        content = getattr(res, "content", b"") or b""
+        try:
+            size = len(content)
+        except TypeError:
+            size = 0
+        return f"<{size} bytes binary>"
     return text[:limit]
 
 

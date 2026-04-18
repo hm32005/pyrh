@@ -161,6 +161,55 @@ def test_generate_request_id_returns_uuid_string():
 
 
 # ---------------------------------------------------------------------------
+# _truncate_body — content-type gating
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_body_text_content_returns_truncated_text():
+    """text/plain and application/json bodies pass through (truncated)."""
+    from pyrh.models.sessionmanager import _truncate_body
+
+    for ct in ("text/plain", "text/html", "application/json"):
+        resp = mock.Mock()
+        resp.text = "hello world"
+        resp.headers = {"Content-Type": ct}
+        resp.content = b"hello world"
+        assert _truncate_body(resp) == "hello world"
+
+
+def test_truncate_body_non_text_returns_size_marker():
+    """Regression: a binary Content-Type (image/png, application/octet-stream,
+    …) must NOT have its bytes emitted into log messages. Return a
+    ``<N bytes binary>`` size marker instead.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #10.
+    """
+    from pyrh.models.sessionmanager import _truncate_body
+
+    resp = mock.Mock()
+    resp.text = "raw bytes as unicode garbage"
+    resp.headers = {"Content-Type": "application/octet-stream"}
+    resp.content = b"\x00" * 42
+
+    assert _truncate_body(resp) == "<42 bytes binary>"
+
+
+def test_truncate_body_missing_content_type_falls_back_to_text():
+    """If Content-Type is absent or empty, fall back to the existing
+    text-truncation behaviour so test doubles and edge responses still
+    produce readable error messages."""
+    from pyrh.models.sessionmanager import _truncate_body
+
+    resp = mock.Mock()
+    resp.text = "some body text"
+    resp.headers = {}
+    resp.content = b"some body text"
+
+    assert _truncate_body(resp) == "some body text"
+
+
+# ---------------------------------------------------------------------------
 # _get_oauth_payload
 # ---------------------------------------------------------------------------
 
