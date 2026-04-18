@@ -54,6 +54,7 @@ INQUIRIES: URL = API_BASE / "pathfinder/inquiries"
 CHALLENGE: URL = API_BASE / "challenge"
 PUSH_PROMPT_STATUS: URL = API_BASE / "push"
 
+
 def challenge(challenge_id: str) -> URL:
     """Build challenge response url.
 
@@ -66,6 +67,7 @@ def challenge(challenge_id: str) -> URL:
     """
     return API_BASE / f"challenge/{challenge_id}/respond/"
 
+
 def ach(option: str) -> URL:
     """
     Combination of 3 ACH endpoints. Options include:
@@ -74,6 +76,7 @@ def ach(option: str) -> URL:
         * transfers
     """
     return ACH_BASE / "iav/auth/" if option == "iav" else ACH_BASE / f"{option}/"
+
 
 def instruments(
     symbol: Optional[str] = None, query: Optional[str] = None, id_: Optional[str] = None
@@ -103,6 +106,7 @@ def instruments(
     elif id_ is not None:
         return INSTRUMENTS_BASE / f"{id_}/"
 
+
 def orders(order_id: Optional[str] = None) -> URL:
     """Build endpoint to place orders.
 
@@ -118,6 +122,7 @@ def orders(order_id: Optional[str] = None) -> URL:
     else:
         return ORDERS_BASE
 
+
 def news(stock: str) -> URL:
     """Build news endpoint for a particular stock
 
@@ -129,6 +134,7 @@ def news(stock: str) -> URL:
 
     """
     return NEWS_BASE / f"{stock}/"
+
 
 def fundamentals(stock: str) -> URL:
     """Build fundamentals endpoint for a particular stock
@@ -142,6 +148,7 @@ def fundamentals(stock: str) -> URL:
     """
     return FUNDAMENTALS_BASE / f"{stock}/"
 
+
 def tags(tag: str) -> URL:
     """Build endpoints for tickers with a particular tag.
 
@@ -153,6 +160,7 @@ def tags(tag: str) -> URL:
 
     """
     return TAGS_BASE / f"{tag}/"
+
 
 def chain(instrument_id: str) -> URL:
     """Build the query for a particular options chain.
@@ -170,6 +178,7 @@ def chain(instrument_id: str) -> URL:
     return (
         OPTIONS_CHAIN_BASE.with_query(equity_instrument_ids=f"{instrument_id}") / "/"
     )  # TODO: find out if this trailing slash is required.
+
 
 def options(chain_id: str, dates: str, option_type: str) -> URL:
     """Build options search endpoint.
@@ -189,6 +198,7 @@ def options(chain_id: str, dates: str, option_type: str) -> URL:
         type=f"{option_type}",
     )
 
+
 @property
 def market_data(option_id: Optional[str] = None) -> URL:
     """Build market data endpoint.
@@ -203,6 +213,7 @@ def market_data(option_id: Optional[str] = None) -> URL:
         return MARKET_DATA_BASE / f"{option_id}/"
     else:
         return MARKET_DATA_BASE
+
 
 def market_data_quotes(options_instruments):
     market_data() / "quotes/?instruments=" / ",".join(options_instruments)

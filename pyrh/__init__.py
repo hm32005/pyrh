@@ -15,5 +15,5 @@ __all__ = [
     "exceptions",
     "CLIENT_ID",
     "EXPIRATION_TIME",
-    "TIMEOUT"
+    "TIMEOUT",
 ]

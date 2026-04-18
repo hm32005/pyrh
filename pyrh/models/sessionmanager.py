@@ -20,7 +20,7 @@ from pyrh import urls
 from pyrh.constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
 from pyrh.exceptions import AuthenticationError, PyrhValueError
 from pyrh.models.base import BaseModel, BaseSchema, JSON
-from pyrh.models.oauth import (CHALLENGE_TYPE_VAL, OAuth, OAuthSchema)
+from pyrh.models.oauth import CHALLENGE_TYPE_VAL, OAuth, OAuthSchema
 from pyrh.util import JSON_ENCODING, robinhood_headers
 from requests.exceptions import HTTPError
 from requests.structures import CaseInsensitiveDict
@@ -39,9 +39,7 @@ else:
     CaseInsensitiveDictType = CaseInsensitiveDict
 Proxies = Dict[str, str]
 
-HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(
-    robinhood_headers
-)
+HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(robinhood_headers)
 """Headers used when performing requests with robinhood api."""
 
 
@@ -79,14 +77,14 @@ class SessionManager(BaseModel):
     """
 
     def __init__(
-            self,
-            username: Optional[str] = None,
-            password: Optional[str] = None,
-            mfa: Optional[str] = "",
-            challenge_type: Optional[str] = "sms",
-            headers: Optional[CaseInsensitiveDictType] = None,
-            proxies: Optional[Proxies] = None,
-            **kwargs: Any
+        self,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        mfa: Optional[str] = "",
+        challenge_type: Optional[str] = "sms",
+        headers: Optional[CaseInsensitiveDictType] = None,
+        proxies: Optional[Proxies] = None,
+        **kwargs: Any,
     ) -> None:
         self.__logger: Logger = logging.getLogger(__name__)
         self.__logger.info("Initializing session manager!")
@@ -121,11 +119,13 @@ class SessionManager(BaseModel):
         self.oauth: OAuth = kwargs.pop("oauth", OAuth())
         self.__logger.info("oauth done!")
 
-        epoch_time = pendulum.datetime(1970, 1,
-                                       1,
-                                       tz='UTC')
+        epoch_time = pendulum.datetime(1970, 1, 1, tz="UTC")
 
-        self.expires_at: pendulum.datetime = pendulum.now("UTC").add(seconds=self.oauth.expires_in) if hasattr(self.oauth, "access_token") and self.oauth.expires_in else epoch_time
+        self.expires_at: pendulum.datetime = (
+            pendulum.now("UTC").add(seconds=self.oauth.expires_in)
+            if hasattr(self.oauth, "access_token") and self.oauth.expires_in
+            else epoch_time
+        )
 
         self.__logger.info("expires_at done!")
         self.__logger.info(f"type(self.expires_at): {type(self.expires_at)}")
@@ -209,7 +209,7 @@ class SessionManager(BaseModel):
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("Challenge Response Error")
@@ -230,7 +230,9 @@ class SessionManager(BaseModel):
 
         """
         self.oauth = oauth
-        self.expires_at: pendulum.datetime = pendulum.now(tz="UTC").add(seconds=self.oauth.expires_in)
+        self.expires_at: pendulum.datetime = pendulum.now(tz="UTC").add(
+            seconds=self.oauth.expires_in
+        )
         self.session.headers.update(
             {"Authorization": f"Bearer {self.oauth.access_token}"}
         )
@@ -239,16 +241,17 @@ class SessionManager(BaseModel):
     def _generate_request_id():
         return str(uuid.uuid4())
 
-    def get(self,
-            url: Union[str, URL],
-            params: Optional[Dict[str, Any]] = None,
-            headers: Optional[CaseInsensitiveDictType] = None,
-            raise_errors: bool = True,
-            return_response: bool = False,
-            auto_login: bool = True,
-            schema: Optional[Schema] = None,
-            many: bool = False,
-            ) -> Tuple[Dict[str, Any], Response] | Dict[str, Any]:
+    def get(
+        self,
+        url: Union[str, URL],
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[CaseInsensitiveDictType] = None,
+        raise_errors: bool = True,
+        return_response: bool = False,
+        auto_login: bool = True,
+        schema: Optional[Schema] = None,
+        many: bool = False,
+    ) -> Tuple[Dict[str, Any], Response] | Dict[str, Any]:
         """Run a wrapped session HTTP GET request.
 
         Note:
@@ -314,7 +317,12 @@ class SessionManager(BaseModel):
             if get_otp_proc.returncode == 0:
                 result_json = json.loads(get_otp_proc.stdout)
                 return result_json["results"][0]["code"]
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+        except (
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+            KeyError,
+            FileNotFoundError,
+        ) as e:
             self.logger.warning(f"APW OTP failed: {e}")
 
         # Fall back to manual input
@@ -323,18 +331,20 @@ class SessionManager(BaseModel):
 
     def _get_oauth_payload(self):
         oauth_payload = {
-            "client_id":                        CLIENT_ID,
+            "client_id": CLIENT_ID,
             "create_read_only_secondary_token": True,
-            "device_token":                     self.device_token,
-            "expires_in":                       EXPIRATION_TIME,
-            "grant_type":                       "password",
-            "password":                         self.password,
-            "request_id":                       self._generate_request_id(),
-            "scope":                            "internal",
-            "token_request_path":               "/login",
-            "username":                         self.username
+            "device_token": self.device_token,
+            "expires_in": EXPIRATION_TIME,
+            "grant_type": "password",
+            "password": self.password,
+            "request_id": self._generate_request_id(),
+            "scope": "internal",
+            "token_request_path": "/login",
+            "username": self.username,
         }
-        self.logger.debug("OAuth payload generated for user=%s", self.username[:3] + "***")
+        self.logger.debug(
+            "OAuth payload generated for user=%s", self.username[:3] + "***"
+        )
         return oauth_payload
 
     def _login_oauth2(self) -> None:
@@ -368,10 +378,14 @@ class SessionManager(BaseModel):
     def _mfa_login_workflow(self, workflow_id, oauth_payload) -> OAuth | None:
         machine_id = self._user_machine_request(workflow_id)
         challenge_id, challenge_type = self._user_view_get(machine_id)
-        self.logger.info(f"_mfa_login_workflow| challenge_type: {challenge_type}, challenge_id: {challenge_id}")
+        self.logger.info(
+            f"_mfa_login_workflow| challenge_type: {challenge_type}, challenge_id: {challenge_id}"
+        )
 
         if challenge_type == "prompt":
-            self.logger.info("Device approval required — waiting for user to approve on mobile app")
+            self.logger.info(
+                "Device approval required — waiting for user to approve on mobile app"
+            )
             self._poll_prompt_approval(challenge_id)
         else:
             # SMS / TOTP fallback
@@ -386,7 +400,9 @@ class SessionManager(BaseModel):
         if self._user_view_post(machine_id):
             return self._mfa_oauth2(oauth_payload, OAuthSchema())
 
-    def _mfa_oauth2(self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3) -> str | OAuth:
+    def _mfa_oauth2(
+        self, oauth_payload: JSON, schema: OAuthSchema = None, attempts: int = 3
+    ) -> str | OAuth:
         """Mfa auth flow.
 
          For people with 2fa.
@@ -438,15 +454,15 @@ class SessionManager(BaseModel):
             raise AuthenticationError("Too many incorrect mfa attempts")
 
     def post(
-            self,
-            url: Union[str, URL],
-            data: Optional[JSON] = None,
-            headers: Optional[CaseInsensitiveDictType] = None,
-            raise_errors: bool = True,
-            return_response: bool = False,
-            auto_login: bool = True,
-            schema: Optional[Schema] = None,
-            many: bool = False,
+        self,
+        url: Union[str, URL],
+        data: Optional[JSON] = None,
+        headers: Optional[CaseInsensitiveDictType] = None,
+        raise_errors: bool = True,
+        return_response: bool = False,
+        auto_login: bool = True,
+        schema: Optional[Schema] = None,
+        many: bool = False,
     ) -> Any:
         """Run a wrapped session HTTP POST request.
 
@@ -512,15 +528,19 @@ class SessionManager(BaseModel):
 
         """
         self.logger.info("Refreshing token")
-        if not self.oauth or not self.oauth.is_valid or not hasattr(self.oauth, "refresh_token"):
+        if (
+            not self.oauth
+            or not self.oauth.is_valid
+            or not hasattr(self.oauth, "refresh_token")
+        ):
             raise AuthenticationError("No refresh token available")
 
         refresh_payload = {
-            "client_id":     CLIENT_ID,
-            "grant_type":    "refresh_token",
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
             "refresh_token": self.oauth.refresh_token,
-            "device_token":  self.device_token,
-            "scope":         "internal",
+            "device_token": self.device_token,
+            "scope": "internal",
         }
 
         oauth, res = self.post(
@@ -532,7 +552,11 @@ class SessionManager(BaseModel):
             schema=OAuthSchema(),
         )
 
-        if res.status_code == requests.codes.ok and hasattr(oauth, "is_valid") and oauth.is_valid:
+        if (
+            res.status_code == requests.codes.ok
+            and hasattr(oauth, "is_valid")
+            and oauth.is_valid
+        ):
             self._configure_manager(oauth)
             self.logger.info("Token refreshed successfully")
         else:
@@ -540,22 +564,18 @@ class SessionManager(BaseModel):
             raise AuthenticationError("Failed to refresh token")
 
     def _user_machine_request(self, user_workflow_id):
-        payload = \
-            {
-                "device_id": self.device_token,
-                "flow":      "suv",
-                "input":
-                             {
-                                 "workflow_id": user_workflow_id
-                             }
-            }
+        payload = {
+            "device_id": self.device_token,
+            "flow": "suv",
+            "input": {"workflow_id": user_workflow_id},
+        }
         self.session.headers["Content-Type"] = JSON_ENCODING
         data, res = self.post(
             urls.USER_MACHINE,
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code == requests.codes.ok:
             return data["id"]
@@ -578,7 +598,10 @@ class SessionManager(BaseModel):
             AuthenticationError: If the challenge is denied, expired, or times out.
         """
         import time
-        prompt_url = str(urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/")
+
+        prompt_url = str(
+            urls.PUSH_PROMPT_STATUS / f"{challenge_id}/get_prompts_status/"
+        )
         elapsed = 0
         while elapsed < timeout:
             time.sleep(interval)
@@ -606,10 +629,7 @@ class SessionManager(BaseModel):
     def _user_view_get(self, machine_id):
         request_url = urls.INQUIRIES / f"{machine_id}/user_view/"
         data, res = self.get(
-            request_url,
-            raise_errors=False,
-            auto_login=False,
-            return_response=True
+            request_url, raise_errors=False, auto_login=False, return_response=True
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("User View Error")
@@ -627,11 +647,14 @@ class SessionManager(BaseModel):
             data=payload,
             raise_errors=False,
             auto_login=False,
-            return_response=True
+            return_response=True,
         )
         if res.status_code != requests.codes.ok:
             self.logger.error("User View Error")
-        elif res.status_code == requests.codes.ok and data["type_context"]["result"] == "workflow_status_approved":
+        elif (
+            res.status_code == requests.codes.ok
+            and data["type_context"]["result"] == "workflow_status_approved"
+        ):
             return True
         else:
             raise AuthenticationError("User View Error")
@@ -662,7 +685,8 @@ class SessionManager(BaseModel):
 
         """
         self.logger.info(
-            f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}")
+            f"login| self.oauth.is_valid: {self.oauth.is_valid}  \t  self.token_expired: {self.token_expired} \t force_refresh: {force_refresh}"
+        )
         if "Authorization" not in self.session.headers:
             # No active Authorization header — need to establish a session
             if self.oauth and self.oauth.is_valid:
@@ -678,7 +702,9 @@ class SessionManager(BaseModel):
             elif self.login_set:
                 self._login_oauth2()
             else:
-                raise AuthenticationError("Valid auth token not sent and login credentials missing")
+                raise AuthenticationError(
+                    "Valid auth token not sent and login credentials missing"
+                )
         elif force_refresh or self.token_expired:
             # Already have Authorization header but token needs refreshing
             if self.oauth and self.oauth.is_valid:
@@ -690,7 +716,10 @@ class SessionManager(BaseModel):
             if self.login_set:
                 self._login_oauth2()
             else:
-                raise AuthenticationError("Cannot refresh: no refresh token and no login credentials")
+                raise AuthenticationError(
+                    "Cannot refresh: no refresh token and no login credentials"
+                )
+
     @property
     def login_set(self) -> bool:
         """Check if login info is properly configured.
@@ -723,7 +752,9 @@ class SessionManager(BaseModel):
             True if expired otherwise False
         """
         self.logger.info(f"token_expired| self.expires_at: {self.expires_at}")
-        self.logger.info(f"token_expired| type(self.expires_at): {type(self.expires_at)}")
+        self.logger.info(
+            f"token_expired| type(self.expires_at): {type(self.expires_at)}"
+        )
         return pendulum.now(tz="UTC") > self.expires_at
 
 

@@ -83,9 +83,7 @@ def test_init_accepts_explicit_device_token():
     from pyrh.models import SessionManager
 
     dt = "11111111-2222-3333-4444-555555555555"
-    sm = SessionManager(
-        username="u@example.com", password="p", device_token=dt
-    )
+    sm = SessionManager(username="u@example.com", password="p", device_token=dt)
     assert sm.device_token == dt
 
 
@@ -100,9 +98,7 @@ def test_init_accepts_explicit_oauth_and_computes_expires_at():
     oauth.expires_in = 86400
 
     with freeze_time("2020-01-01"):
-        sm = SessionManager(
-            username="u@example.com", password="p", oauth=oauth
-        )
+        sm = SessionManager(username="u@example.com", password="p", oauth=oauth)
 
     # expires_at should be 1 day after the frozen now
     expected = pendulum.datetime(2020, 1, 2, tz="UTC")
@@ -128,7 +124,9 @@ def test_init_rejects_invalid_challenge_type():
     from pyrh.models import SessionManager
 
     with pytest.raises(ValueError, match="challenge_type must be"):
-        SessionManager(username="u@example.com", password="p", challenge_type="carrier_pigeon")
+        SessionManager(
+            username="u@example.com", password="p", challenge_type="carrier_pigeon"
+        )
 
 
 def test_session_headers_do_not_alias_module_headers():
@@ -331,9 +329,7 @@ def test_post_with_custom_headers(sm):
     adapter.register_uri("POST", MOCK_URL, text='{"ok": true}', status_code=200)
 
     headers = CaseInsensitiveDict({"X-Something": "yes"})
-    body = sm.post(
-        MOCK_URL, data={"a": 1}, headers=headers, auto_login=False
-    )
+    body = sm.post(MOCK_URL, data={"a": 1}, headers=headers, auto_login=False)
     assert body == {"ok": True}
     assert adapter.last_request.headers["X-Something"] == "yes"
 
@@ -363,14 +359,8 @@ def test_user_machine_request_failure_raises(sm):
 
 
 def test_user_view_get_parses_sheriff_challenge(sm):
-    body = {
-        "context": {
-            "sheriff_challenge": {"id": "chal-42", "type": "prompt"}
-        }
-    }
-    with mock.patch.object(
-        sm, "get", return_value=(body, _mock_response(200))
-    ):
+    body = {"context": {"sheriff_challenge": {"id": "chal-42", "type": "prompt"}}}
+    with mock.patch.object(sm, "get", return_value=(body, _mock_response(200))):
         cid, ctype = sm._user_view_get("m-123")
     assert cid == "chal-42"
     assert ctype == "prompt"
@@ -379,9 +369,7 @@ def test_user_view_get_parses_sheriff_challenge(sm):
 def test_user_view_get_defaults_type_to_sms_when_missing(sm):
     """When sheriff_challenge has no `type`, _user_view_get defaults to 'sms'."""
     body = {"context": {"sheriff_challenge": {"id": "chal-42"}}}
-    with mock.patch.object(
-        sm, "get", return_value=(body, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "get", return_value=(body, _mock_response(200))):
         cid, ctype = sm._user_view_get("m-123")
     assert (cid, ctype) == ("chal-42", "sms")
 
@@ -389,18 +377,14 @@ def test_user_view_get_defaults_type_to_sms_when_missing(sm):
 def test_user_view_get_non_200_raises(sm):
     from pyrh.exceptions import AuthenticationError
 
-    with mock.patch.object(
-        sm, "get", return_value=({}, _mock_response(500))
-    ):
+    with mock.patch.object(sm, "get", return_value=({}, _mock_response(500))):
         with pytest.raises(AuthenticationError, match="User View Error"):
             sm._user_view_get("m-123")
 
 
 def test_user_view_post_approved_returns_true(sm):
     body = {"type_context": {"result": "workflow_status_approved"}}
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
         assert sm._user_view_post("m-123") is True
 
 
@@ -409,18 +393,14 @@ def test_user_view_post_non_approved_200_raises(sm):
     from pyrh.exceptions import AuthenticationError
 
     body = {"type_context": {"result": "workflow_status_denied"}}
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
         with pytest.raises(AuthenticationError, match="User View Error"):
             sm._user_view_post("m-123")
 
 
 def test_user_view_post_non_200_returns_false(sm):
     """When the server returns non-200 the method logs and returns False."""
-    with mock.patch.object(
-        sm, "post", return_value=({}, _mock_response(500))
-    ):
+    with mock.patch.object(sm, "post", return_value=({}, _mock_response(500))):
         assert sm._user_view_post("m-123") is False
 
 
@@ -431,9 +411,7 @@ def test_user_view_post_non_200_returns_false(sm):
 
 def test_challenge_response_validated(sm):
     body = {"status": "validated"}
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
         assert sm._challenge_response("chal-1", "654321") is True
 
 
@@ -442,18 +420,14 @@ def test_challenge_response_not_validated_raises(sm):
     from pyrh.exceptions import AuthenticationError
 
     body = {"status": "failed"}
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
         with pytest.raises(AuthenticationError, match="Challenge Response Error"):
             sm._challenge_response("chal-1", "654321")
 
 
 def test_challenge_response_non_200_returns_false(sm):
     """Non-200 logs the error and returns False."""
-    with mock.patch.object(
-        sm, "post", return_value=({}, _mock_response(500))
-    ):
+    with mock.patch.object(sm, "post", return_value=({}, _mock_response(500))):
         assert sm._challenge_response("chal-1", "654321") is False
 
 
@@ -466,9 +440,7 @@ def test_challenge_response_non_200_returns_false(sm):
 def test_mfa_oauth2_403_returns_workflow_id(sm):
     """A 403 response must return the embedded verification_workflow.id."""
     body = {"verification_workflow": {"id": "wf-42"}}
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(403))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(403))):
         result = sm._mfa_oauth2({"any": "payload"})
     assert result == "wf-42"
 
@@ -481,9 +453,7 @@ def test_mfa_oauth2_200_returns_oauth(sm):
     oauth.refresh_token = "rt"
     oauth.expires_in = 3600
 
-    with mock.patch.object(
-        sm, "post", return_value=(oauth, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(oauth, _mock_response(200))):
         result = sm._mfa_oauth2({"any": "payload"}, schema=OAuthSchema())
 
     assert result is oauth
@@ -561,7 +531,9 @@ def test_mfa_login_workflow_challenge_rejected_raises(sm):
         mock.patch.object(sm, "_get_mfa_code", return_value="000000"),
         mock.patch.object(sm, "_challenge_response", return_value=False),
     ):
-        with pytest.raises(AuthenticationError, match="Challenge response was not validated"):
+        with pytest.raises(
+            AuthenticationError, match="Challenge response was not validated"
+        ):
             sm._mfa_login_workflow("wf-1", {"p": 1})
 
 
@@ -735,9 +707,7 @@ def test_login_force_refresh_refresh_fails_falls_back(sm):
     sm.session.headers["Authorization"] = "Bearer at"
 
     with (
-        mock.patch.object(
-            sm, "_refresh_oauth2", side_effect=AuthenticationError("x")
-        ),
+        mock.patch.object(sm, "_refresh_oauth2", side_effect=AuthenticationError("x")),
         mock.patch.object(sm, "_login_oauth2") as relogin,
     ):
         sm.login(force_refresh=True)
@@ -813,9 +783,7 @@ def test_poll_prompt_approval_non_200_continues_until_timeout(_sleep, sm):
     """Non-200 responses don't short-circuit; they let the loop time out."""
     from pyrh.exceptions import AuthenticationError
 
-    with mock.patch.object(
-        sm, "get", return_value=({}, _mock_response(500))
-    ):
+    with mock.patch.object(sm, "get", return_value=({}, _mock_response(500))):
         with pytest.raises(AuthenticationError, match="timed out"):
             sm._poll_prompt_approval("c-1", timeout=5, interval=5)
 
@@ -915,9 +883,7 @@ def test_challenge_oauth2_retry_and_exhaust(sm, monkeypatch):
     inner_challenge.can_retry = False
     inner.challenge = inner_challenge
 
-    with mock.patch.object(
-        sm, "post", return_value=(inner, _mock_response(401))
-    ):
+    with mock.patch.object(sm, "post", return_value=(inner, _mock_response(401))):
         with pytest.raises(AuthenticationError, match="Exceeded available"):
             sm._challenge_oauth2(incoming, {"p": 1})
 
@@ -949,9 +915,9 @@ def test_challenge_oauth2_invalid_code_retries_then_succeeds(sm, monkeypatch):
     final_oauth.expires_in = 3600
 
     side_effect = [
-        (retry_inner, _mock_response(401)),   # first challenge validation -> retry
-        ({}, _mock_response(200)),            # recursed challenge validation OK
-        final_oauth,                          # recursed final OAUTH exchange
+        (retry_inner, _mock_response(401)),  # first challenge validation -> retry
+        ({}, _mock_response(200)),  # recursed challenge validation OK
+        final_oauth,  # recursed final OAUTH exchange
     ]
     with mock.patch.object(sm, "post", side_effect=side_effect):
         out = sm._challenge_oauth2(incoming, {"p": 1})
@@ -1049,9 +1015,7 @@ def test_mfa_oauth2_does_not_log_token_values_at_info(sm, caplog):
     oauth.expires_in = 3600
 
     caplog.set_level(logging.DEBUG, logger="pyrh.models.sessionmanager")
-    with mock.patch.object(
-        sm, "post", return_value=(oauth, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "post", return_value=(oauth, _mock_response(200))):
         sm._mfa_oauth2({"any": "payload"}, schema=OAuthSchema())
 
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
@@ -1084,9 +1048,7 @@ def test_refresh_oauth2_success_configures_manager(sm):
 
     adapter = requests_mock_lib.Adapter()
     sm.session.mount("https://", adapter)
-    adapter.register_uri(
-        "POST", str(urls.OAUTH), json=new_body, status_code=200
-    )
+    adapter.register_uri("POST", str(urls.OAUTH), json=new_body, status_code=200)
 
     sm._refresh_oauth2()
 
@@ -1165,11 +1127,7 @@ def test_mfa_login_workflow_prompt_flow_integration(sm):
     adapter.register_uri(
         "GET",
         user_view_url,
-        json={
-            "context": {
-                "sheriff_challenge": {"id": "chal-9", "type": "prompt"}
-            }
-        },
+        json={"context": {"sheriff_challenge": {"id": "chal-9", "type": "prompt"}}},
         status_code=200,
     )
 
@@ -1234,9 +1192,7 @@ def test_post_network_timeout_surfaces_as_auth_error(sm):
 
     adapter = requests_mock_lib.Adapter()
     sm.session.mount("https://", adapter)
-    adapter.register_uri(
-        "POST", str(urls.OAUTH), exc=requests.exceptions.Timeout
-    )
+    adapter.register_uri("POST", str(urls.OAUTH), exc=requests.exceptions.Timeout)
 
     # The current implementation lets requests.Timeout propagate. The
     # regression guarantee is "some exception is raised, not silent None".
@@ -1254,9 +1210,7 @@ def test_user_view_get_missing_sheriff_challenge_raises_typed_error(sm):
     behaviour so a future wrap-in-AuthenticationError change is a detected
     regression, not a silent contract break.
     """
-    with mock.patch.object(
-        sm, "get", return_value=({}, _mock_response(200))
-    ):
+    with mock.patch.object(sm, "get", return_value=({}, _mock_response(200))):
         # Current contract: KeyError leaks; callers catching Exception are safe.
         with pytest.raises((KeyError, Exception)):
             sm._user_view_get("m-123")
@@ -1268,9 +1222,7 @@ def test_mfa_oauth2_malformed_403_body_raises_typed_error(sm):
     AuthenticationError is a detectable improvement, not a silent break.
     """
     body = {}  # missing verification_workflow entirely
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(403))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(403))):
         with pytest.raises((KeyError, Exception)):
             sm._mfa_oauth2({"any": "payload"})
 
@@ -1285,9 +1237,7 @@ def test_mfa_oauth2_403_branch_logs_keys_only_at_debug(sm, caplog):
         "access_token": "SHOULD_NOT_APPEAR",
     }
     caplog.set_level(logging.DEBUG, logger="pyrh.models.sessionmanager")
-    with mock.patch.object(
-        sm, "post", return_value=(body, _mock_response(403))
-    ):
+    with mock.patch.object(sm, "post", return_value=(body, _mock_response(403))):
         sm._mfa_oauth2({"any": "payload"})
 
     joined = "\n".join(rec.getMessage() for rec in caplog.records)

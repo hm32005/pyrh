@@ -29,7 +29,7 @@ class Challenge(BaseModel):
 
         """
         return self.remaining_attempts > 0 and (
-                datetime.now(tz=pytz.utc) < self.expires_in
+            datetime.now(tz=pytz.utc) < self.expires_in
         )
 
 
@@ -68,12 +68,8 @@ class OAuth(BaseModel):
             self.logger.debug("OAuth init| refresh_token set (redacted)")
         if "expires_at" in kwargs:
             utc_now = pendulum.now(tz="UTC")
-            self.expires_in = utc_now.diff(
-                kwargs["expires_at"], abs=False
-            ).in_seconds()
-            self.logger.debug(
-                "OAuth init| expires_in computed=%ss", self.expires_in
-            )
+            self.expires_in = utc_now.diff(kwargs["expires_at"], abs=False).in_seconds()
+            self.logger.debug("OAuth init| expires_in computed=%ss", self.expires_in)
 
     @property
     def logger(self):
