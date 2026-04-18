@@ -135,13 +135,7 @@ class Robinhood(InstrumentManager, SessionManager):
 
         # Handles the case of multiple tickers
         if stock.find(",") != -1:
-            res.extend(
-                (
-                    append_stock(result)
-                    for result in data["results"]
-                    if result is not None
-                )
-            )
+            res.extend((append_stock(result) for result in data["results"] if result is not None))
         else:
             res.append(append_stock(data))
 
@@ -154,9 +148,7 @@ class Robinhood(InstrumentManager, SessionManager):
         return data
 
     def get_stock_marketdata(self, instruments: list[Any]) -> dict[str, Any]:
-        info = self.get_url(
-            urls.market_data() / "quotes/?instruments=" / ",".join(instruments)
-        )
+        info = self.get_url(urls.market_data() / "quotes/?instruments=" / ",".join(instruments))
         return info["results"]
 
     def get_historical_quotes(self, stock, interval, span, bounds=Bounds.REGULAR):
@@ -574,11 +566,11 @@ class Robinhood(InstrumentManager, SessionManager):
     def get_option_quote(self, symbol, strike, expiry, otype, state="active"):
         url = urls.OPTIONS_BASE.join(URL("instruments/"))
         params = {
-            "chain_symbol": symbol,
-            "strike_price": strike,
+            "chain_symbol":     symbol,
+            "strike_price":     strike,
             "expiration_dates": expiry,
-            "type": otype,
-            "state": state,
+            "type":             otype,
+            "state":            state,
         }
         # symbol, strike, expiry, otype should uniquely define an option
         results = self.get_url(url.with_query(**params)).get("results")
@@ -680,7 +672,7 @@ class Robinhood(InstrumentManager, SessionManager):
     ###########################################################################
 
     def place_market_buy_order(
-        self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
+            self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
     ):
         """Wrapper for placing market buy orders
 
@@ -709,12 +701,12 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_limit_buy_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            price=None,
+            quantity=None,
     ):
         """Wrapper for placing limit buy orders
 
@@ -745,12 +737,12 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_stop_loss_buy_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        stop_price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            stop_price=None,
+            quantity=None,
     ):
         """Wrapper for placing stop loss buy orders
 
@@ -781,13 +773,13 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_stop_limit_buy_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        stop_price=None,
-        price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            stop_price=None,
+            price=None,
+            quantity=None,
     ):
         """Wrapper for placing stop limit buy orders
 
@@ -820,7 +812,7 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_market_sell_order(
-        self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
+            self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
     ):
         """Wrapper for placing market sell orders
 
@@ -849,12 +841,12 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_limit_sell_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            price=None,
+            quantity=None,
     ):
         """Wrapper for placing limit sell orders
 
@@ -885,12 +877,12 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_stop_loss_sell_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        stop_price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            stop_price=None,
+            quantity=None,
     ):
         """Wrapper for placing stop loss sell orders
 
@@ -921,13 +913,13 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_stop_limit_sell_order(
-        self,
-        instrument_url=None,
-        symbol=None,
-        time_in_force=None,
-        price=None,
-        stop_price=None,
-        quantity=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            price=None,
+            stop_price=None,
+            quantity=None,
     ):
         """Wrapper for placing stop limit sell orders
 
@@ -961,16 +953,16 @@ class Robinhood(InstrumentManager, SessionManager):
 
     # TODO: fix the function complexity
     def submit_sell_order(  # noqa: C901
-        self,
-        instrument_url=None,
-        symbol=None,
-        order_type=None,
-        time_in_force=None,
-        trigger=None,
-        price=None,
-        stop_price=None,
-        quantity=None,
-        side=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            order_type=None,
+            time_in_force=None,
+            trigger=None,
+            price=None,
+            stop_price=None,
+            quantity=None,
+            side=None,
     ):
         """Submits order to Robinhood
 
@@ -1134,16 +1126,16 @@ class Robinhood(InstrumentManager, SessionManager):
 
     # TODO: Fix function complexity
     def submit_buy_order(  # noqa: C901
-        self,
-        instrument_url=None,
-        symbol=None,
-        order_type=None,
-        time_in_force=None,
-        trigger=None,
-        price=None,
-        stop_price=None,
-        quantity=None,
-        side=None,
+            self,
+            instrument_url=None,
+            symbol=None,
+            order_type=None,
+            time_in_force=None,
+            trigger=None,
+            price=None,
+            stop_price=None,
+            quantity=None,
+            side=None,
     ):
         """Submits buy order to Robinhood
 
@@ -1305,14 +1297,14 @@ class Robinhood(InstrumentManager, SessionManager):
         return res
 
     def place_order(
-        self,
-        instrument,
-        quantity=1,
-        price=0.0,
-        transaction=None,
-        trigger="immediate",
-        order="market",
-        time_in_force="gfd",
+            self,
+            instrument,
+            quantity=1,
+            price=0.0,
+            transaction=None,
+            trigger="immediate",
+            order="market",
+            time_in_force="gfd",
     ):
         """Place an order with Robinhood
 
@@ -1342,14 +1334,14 @@ class Robinhood(InstrumentManager, SessionManager):
                 price = self.quote_data(instrument["symbol"])["last_trade_price"]
 
         payload = {
-            "account": self.get_account()["url"],
-            "instrument": unquote(instrument["url"]),
-            "symbol": instrument["symbol"],
-            "type": order.lower(),
+            "account":       self.get_account()["url"],
+            "instrument":    unquote(instrument["url"]),
+            "symbol":        instrument["symbol"],
+            "type":          order.lower(),
             "time_in_force": time_in_force.lower(),
-            "trigger": trigger,
-            "quantity": quantity,
-            "side": transaction.name.lower(),
+            "trigger":       trigger,
+            "quantity":      quantity,
+            "side":          transaction.name.lower(),
         }
 
         if order.lower() == "stop":
