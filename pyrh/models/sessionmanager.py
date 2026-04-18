@@ -356,7 +356,16 @@ class SessionManager(BaseModel):
         return (data, res) if return_response else data
 
     def _get_mfa_code(self):
-        # Try APW first
+        # Try APW first. The two failure modes are intentionally split:
+        #
+        # 1. APW unavailable / timed out (FileNotFoundError, TimeoutExpired):
+        #    the binary isn't on this host or hung. Fall back to input() so
+        #    the user can still complete MFA.
+        # 2. APW returned malformed output (JSONDecodeError, KeyError,
+        #    IndexError): the tool is present but its contract is broken —
+        #    e.g. a security-relevant output-format change. Refuse to fall
+        #    back to interactive input because the operator needs to see
+        #    and investigate the misbehaviour, not silently retype a code.
         try:
             get_otp_proc = subprocess.run(
                 ["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
@@ -365,15 +374,17 @@ class SessionManager(BaseModel):
                 timeout=5,
             )
             if get_otp_proc.returncode == 0:
-                result_json = json.loads(get_otp_proc.stdout)
-                return result_json["results"][0]["code"]
-        except (
-            subprocess.TimeoutExpired,
-            json.JSONDecodeError,
-            KeyError,
-            FileNotFoundError,
-        ) as e:
-            self.logger.warning(f"APW OTP failed: {e}")
+                try:
+                    result_json = json.loads(get_otp_proc.stdout)
+                    return result_json["results"][0]["code"]
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    self.logger.error("APW returned malformed payload: %s", e)
+                    raise AuthenticationError(
+                        "APW payload is malformed; refusing to fall back to "
+                        "interactive input"
+                    ) from e
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            self.logger.warning("APW unavailable, falling back to input(): %s", e)
 
         # Fall back to manual input
         self.logger.info("Requesting manual MFA code entry")

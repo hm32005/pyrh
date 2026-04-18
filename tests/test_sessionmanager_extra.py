@@ -246,30 +246,56 @@ def test_get_mfa_code_apw_timeout_falls_back_to_input(sm):
     assert code == "222222"
 
 
-def test_get_mfa_code_apw_bad_json_falls_back_to_input(sm):
-    """JSONDecodeError is caught and we fall back."""
+def test_get_mfa_code_apw_malformed_json_raises(sm):
+    """Regression: a successful APW exit (returncode 0) that emits malformed
+    JSON used to silently fall back to ``input()``, so an operator never saw
+    that APW's output contract had been broken. Now we raise an
+    AuthenticationError so the misbehaviour is visible.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #5.
+    """
+    from pyrh.exceptions import AuthenticationError
+
     proc = mock.Mock(returncode=0, stdout="not json")
-
     with (
         mock.patch("pyrh.models.sessionmanager.subprocess.run", return_value=proc),
-        mock.patch("builtins.input", return_value="333333"),
+        mock.patch("builtins.input") as inp,
     ):
-        code = sm._get_mfa_code()
+        with pytest.raises(AuthenticationError, match="APW payload is malformed"):
+            sm._get_mfa_code()
+    inp.assert_not_called()
 
-    assert code == "333333"
 
+def test_get_mfa_code_apw_malformed_raises(sm):
+    """Alternative malformed-shape: APW returned JSON but missing the
+    expected `results` key. Same fail-loud contract as
+    ``test_get_mfa_code_apw_malformed_json_raises``."""
+    from pyrh.exceptions import AuthenticationError
 
-def test_get_mfa_code_apw_missing_key_falls_back_to_input(sm):
-    """Malformed apw output with missing `results` is caught."""
     proc = mock.Mock(returncode=0, stdout=json.dumps({"other": "shape"}))
-
     with (
         mock.patch("pyrh.models.sessionmanager.subprocess.run", return_value=proc),
-        mock.patch("builtins.input", return_value="444444"),
+        mock.patch("builtins.input") as inp,
     ):
-        code = sm._get_mfa_code()
+        with pytest.raises(AuthenticationError, match="APW payload is malformed"):
+            sm._get_mfa_code()
+    inp.assert_not_called()
 
-    assert code == "444444"
+
+def test_get_mfa_code_apw_missing_results_index_raises(sm):
+    """`results` is present but empty -> IndexError when we try [0]. Same
+    contract: raise, don't silently fall back to input()."""
+    from pyrh.exceptions import AuthenticationError
+
+    proc = mock.Mock(returncode=0, stdout=json.dumps({"results": []}))
+    with (
+        mock.patch("pyrh.models.sessionmanager.subprocess.run", return_value=proc),
+        mock.patch("builtins.input") as inp,
+    ):
+        with pytest.raises(AuthenticationError, match="APW payload is malformed"):
+            sm._get_mfa_code()
+    inp.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
