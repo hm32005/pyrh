@@ -1,6 +1,7 @@
 # Deferred: `pyrh/robinhood.py` Coverage
 
 **Status**: deferred to its own session
+**Tracking issue**: [hm32005/pyrh#3](https://github.com/hm32005/pyrh/issues/3)
 **Scope**: the 1517-LOC `pyrh/robinhood.py` module plus its test file (currently missing)
 **Current coverage**: 15 % line (as of 2026-04-18)
 **Target**: ≥ 70 % line on the post-refactor auth-adjacent methods; ≥ 50 % on the data-only methods (`get_quote`, `get_historical_quotes`, etc.).
