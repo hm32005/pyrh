@@ -72,3 +72,7 @@ target/
 *.mypy_cache/*
 *.env
 docs/stubs
+
+# Git worktrees
+.worktrees/
+worktrees/
