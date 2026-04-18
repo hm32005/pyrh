@@ -741,17 +741,16 @@ class SessionManager(BaseModel):
             return_response=True,
         )
         if res.status_code != requests.codes.ok:
-            self.logger.error("User View Error")
-        elif (
-            res.status_code == requests.codes.ok
-            and data["type_context"]["result"] == "workflow_status_approved"
-        ):
-            return True
-        else:
+            # Previously the non-200 branch was "log and return False" which
+            # the caller turned into a generic "MFA login workflow aborted"
+            # error, hiding the real HTTP status. Surface it instead.
             raise AuthenticationError(
-                f"User View Error: status={res.status_code} "
+                f"User View POST HTTP status={res.status_code} "
                 f"body={_truncate_body(res)}"
-            )
+            ) from None
+        if data["type_context"]["result"] == "workflow_status_approved":
+            return True
+        # 200 received but workflow was not approved — genuine denial signal.
         return False
 
     @property

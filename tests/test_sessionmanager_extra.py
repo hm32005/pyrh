@@ -388,20 +388,36 @@ def test_user_view_post_approved_returns_true(sm):
         assert sm._user_view_post("m-123") is True
 
 
-def test_user_view_post_non_approved_200_raises(sm):
-    """If the call returns 200 but result is not approved, AuthenticationError is raised."""
-    from pyrh.exceptions import AuthenticationError
-
+def test_user_view_post_non_approved_200_returns_false(sm):
+    """If the call returns 200 but result is not approved, ``_user_view_post``
+    returns False so the caller can surface the denial via the
+    ``_mfa_login_workflow`` raise site. The previous "raise
+    AuthenticationError(status=200)" was misleading — 200 is a success HTTP
+    status; the denial is a business-layer signal."""
     body = {"type_context": {"result": "workflow_status_denied"}}
     with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
-        with pytest.raises(AuthenticationError, match="User View Error"):
-            sm._user_view_post("m-123")
-
-
-def test_user_view_post_non_200_returns_false(sm):
-    """When the server returns non-200 the method logs and returns False."""
-    with mock.patch.object(sm, "post", return_value=({}, _mock_response(500))):
         assert sm._user_view_post("m-123") is False
+
+
+def test_user_view_post_http_error_raises_with_status(sm):
+    """Regression: a non-200 HTTP status from the user_view POST endpoint
+    used to be logged and returned as False, which the caller converted
+    into a generic "MFA login workflow aborted" error. Now the real HTTP
+    status and response body are surfaced via AuthenticationError.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #3.
+    """
+    from pyrh.exceptions import AuthenticationError
+
+    resp = _mock_response(502)
+    resp.text = "upstream bad gateway"
+    with mock.patch.object(sm, "post", return_value=({}, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._user_view_post("m-123")
+    msg = str(exc_info.value)
+    assert "status=502" in msg
+    assert "upstream bad gateway" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -1524,18 +1540,18 @@ def test_user_view_get_error_includes_status_in_message(sm):
     assert "502" in str(exc_info.value)
 
 
-def test_user_view_post_non_approved_200_includes_status_in_message(sm):
-    """`_user_view_post` on a 200 with non-approved result surfaces status."""
-    from pyrh.exceptions import AuthenticationError
-
+def test_user_view_post_non_approved_200_returns_false_signal(sm):
+    """After fix #3 inverted the guards, a 200 with a denied ``type_context``
+    result is the "user denied on mobile" signal — the method returns False
+    and the caller (`_mfa_login_workflow`) raises the typed denial error.
+    The non-200 path is now the HTTP-error raise site and is covered by
+    ``test_user_view_post_http_error_raises_with_status`` (finding #3).
+    """
     body = {"type_context": {"result": "workflow_status_denied"}}
     resp = _mock_response(200)
     resp.text = '{"type_context": {"result": "workflow_status_denied"}}'
     with mock.patch.object(sm, "post", return_value=(body, resp)):
-        with pytest.raises(AuthenticationError) as exc_info:
-            sm._user_view_post("m-123")
-    # 200 is an HTTP status, still embedded in the message for trace clarity.
-    assert "200" in str(exc_info.value)
+        assert sm._user_view_post("m-123") is False
 
 
 def test_logout_http_error_chains_cause_and_status(sm):
