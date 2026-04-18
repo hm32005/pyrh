@@ -131,6 +131,21 @@ def test_init_rejects_invalid_challenge_type():
         SessionManager(username="u@example.com", password="p", challenge_type="carrier_pigeon")
 
 
+def test_session_headers_do_not_alias_module_headers():
+    """Regression: setting Authorization on one SessionManager must not leak into
+    the module-level HEADERS dict or any other SessionManager instance.
+    """
+    from pyrh.models import SessionManager
+    from pyrh.models.sessionmanager import HEADERS
+
+    sm1 = SessionManager(username="a@example.com", password="p")
+    sm1.session.headers["Authorization"] = "Bearer should-not-leak"
+
+    sm2 = SessionManager(username="b@example.com", password="p")
+    assert "Authorization" not in sm2.session.headers
+    assert "Authorization" not in HEADERS
+
+
 def test_repr_short_form(sm):
     assert repr(sm) == "SessionManager<user@example.com>"
 
