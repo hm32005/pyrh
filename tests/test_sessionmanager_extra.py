@@ -415,20 +415,34 @@ def test_challenge_response_validated(sm):
         assert sm._challenge_response("chal-1", "654321") is True
 
 
-def test_challenge_response_not_validated_raises(sm):
-    """200 but status != validated -> AuthenticationError."""
-    from pyrh.exceptions import AuthenticationError
-
+def test_challenge_response_not_validated_returns_false(sm):
+    """200 but status != validated -> False (genuine wrong-code signal)."""
     body = {"status": "failed"}
     with mock.patch.object(sm, "post", return_value=(body, _mock_response(200))):
-        with pytest.raises(AuthenticationError, match="Challenge Response Error"):
-            sm._challenge_response("chal-1", "654321")
-
-
-def test_challenge_response_non_200_returns_false(sm):
-    """Non-200 logs the error and returns False."""
-    with mock.patch.object(sm, "post", return_value=({}, _mock_response(500))):
         assert sm._challenge_response("chal-1", "654321") is False
+
+
+def test_challenge_response_http_error_raises_with_status(sm):
+    """Regression: non-200 from the challenge endpoint used to be logged and
+    silently turned into ``return False``, which the caller interpreted as
+    "wrong MFA code". A transport failure (5xx, 429, network) is NOT the same
+    as "the user typed the wrong digits", so surface the HTTP status and body
+    via an AuthenticationError instead.
+
+    Review: https://github.com/hm32005/pyrh/pull/2#pullrequestreview-4133838911
+    finding #2.
+    """
+    from pyrh.exceptions import AuthenticationError
+
+    resp = _mock_response(503)
+    resp.text = "upstream maintenance window"
+    with mock.patch.object(sm, "post", return_value=({}, resp)):
+        with pytest.raises(AuthenticationError) as exc_info:
+            sm._challenge_response("chal-1", "654321")
+    msg = str(exc_info.value)
+    # Assertion pair: the f-string "status=NNN" token AND the body substring.
+    assert "status=503" in msg
+    assert "upstream maintenance" in msg
 
 
 # ---------------------------------------------------------------------------

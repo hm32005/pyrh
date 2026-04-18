@@ -255,11 +255,18 @@ class SessionManager(BaseModel):
             return_response=True,
         )
         if res.status_code != requests.codes.ok:
-            self.logger.error("Challenge Response Error")
-        elif res.status_code == requests.codes.ok and data["status"] == "validated":
+            # Previously this branch just logged and returned False, which the
+            # caller interpreted as "MFA rejected" even when the real cause was
+            # a 5xx / 429 / network error. Surface the real status so the user
+            # sees "Challenge response HTTP 503: …" instead of a misleading
+            # "wrong MFA code" retry prompt.
+            raise AuthenticationError(
+                f"Challenge response HTTP status={res.status_code} "
+                f"body={_truncate_body(res)}"
+            ) from None
+        if data["status"] == "validated":
             return True
-        else:
-            raise AuthenticationError("Challenge Response Error")
+        # 200 received but not validated — genuine "wrong code" signal.
         return False
 
     def _configure_manager(self, oauth: OAuth) -> None:
