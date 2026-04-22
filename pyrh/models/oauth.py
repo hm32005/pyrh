@@ -27,9 +27,14 @@ class Challenge(BaseModel):
             True if remaining_attempts is greater than zero and challenge is not \
                 expired, False otherwise.
 
+        Note:
+            Compares against ``self.expires_at``, which matches the
+            Robinhood wire field on the challenge object. Do not conflate
+            with ``OAuth.expires_in`` (seconds TTL int on the token
+            response) — they are different wire fields.
         """
         return self.remaining_attempts > 0 and (
-            datetime.now(tz=pytz.utc) < self.expires_in
+            datetime.now(tz=pytz.utc) < self.expires_at
         )
 
 
@@ -47,7 +52,11 @@ class ChallengeSchema(BaseSchema):
     status = fields.Str(validate=validate.OneOf(["issued", "validated", "failed"]))
     remaining_retries = fields.Int()
     remaining_attempts = fields.Int()
-    expires_in = fields.AwareDateTime(default_timezone=pytz.UTC)  # type: ignore
+    # Wire field name is ``expires_at`` (ISO-8601 aware datetime). Do NOT
+    # rename this to ``expires_in`` — that is a DIFFERENT wire field on the
+    # OAuth token response (integer TTL in seconds). Conflating them drops
+    # the field at schema-load time and breaks ``Challenge.can_retry``.
+    expires_at = fields.AwareDateTime(default_timezone=pytz.UTC)  # type: ignore
 
 
 class OAuth(BaseModel):
