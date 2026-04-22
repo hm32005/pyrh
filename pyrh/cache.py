@@ -1,3 +1,4 @@
+# coding=utf-8
 """Project config/cache files."""
 
 from json import JSONDecodeError

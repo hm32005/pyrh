@@ -1,3 +1,4 @@
+# coding=utf-8
 # import configparser
 # from os import path
 #

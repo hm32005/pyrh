@@ -1,14 +1,19 @@
+# coding=utf-8
 """Export pyrh sub classes."""
 
-from . import exceptions
 from .cache import dump_session, load_session
-from .robinhood import Robinhood
+from .constants import CLIENT_ID, EXPIRATION_TIME, TIMEOUT
+from .robinhood import Robinhood, RobinhoodSchema
 
 __version__ = "2.1.2"
 __all__ = [
     "__version__",
     "Robinhood",
+    "RobinhoodSchema",
     "load_session",
     "dump_session",
     "exceptions",
+    "CLIENT_ID",
+    "EXPIRATION_TIME",
+    "TIMEOUT"
 ]

@@ -1,7 +1,10 @@
+# coding=utf-8
 """Oauth models."""
-
+import logging
 from datetime import datetime
+from typing import Any
 
+import pendulum
 import pytz
 from marshmallow import fields, validate
 
@@ -24,6 +27,11 @@ class Challenge(BaseModel):
             True if remaining_attempts is greater than zero and challenge is not \
                 expired, False otherwise.
 
+        Note:
+            Compares against ``self.expires_at``, which matches the
+            Robinhood wire field on the challenge object. Do not conflate
+            with ``OAuth.expires_in`` (seconds TTL int on the token
+            response) — they are different wire fields.
         """
         return self.remaining_attempts > 0 and (
             datetime.now(tz=pytz.utc) < self.expires_at
@@ -44,11 +52,37 @@ class ChallengeSchema(BaseSchema):
     status = fields.Str(validate=validate.OneOf(["issued", "validated", "failed"]))
     remaining_retries = fields.Int()
     remaining_attempts = fields.Int()
+    # Wire field name is ``expires_at`` (ISO-8601 aware datetime). Do NOT
+    # rename this to ``expires_in`` — that is a DIFFERENT wire field on the
+    # OAuth token response (integer TTL in seconds). Conflating them drops
+    # the field at schema-load time and breaks ``Challenge.can_retry``.
     expires_at = fields.AwareDateTime(default_timezone=pytz.UTC)  # type: ignore
 
 
 class OAuth(BaseModel):
     """The OAuth response model."""
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.__logger = logging.getLogger(__name__)
+        # NOTE: Never log the raw access_token or refresh_token values. The
+        # earlier implementation did so at INFO level, which is the same class
+        # of leak bd227b3 redacted from sessionmanager. Keep these logs
+        # presence-only (redacted).
+        if "access_token" in kwargs:
+            self.access_token = kwargs["access_token"]
+            self.logger.debug("OAuth init| access_token set (redacted)")
+        if "refresh_token" in kwargs:
+            self.refresh_token = kwargs["refresh_token"]
+            self.logger.debug("OAuth init| refresh_token set (redacted)")
+        if "expires_at" in kwargs:
+            utc_now = pendulum.now(tz="UTC")
+            self.expires_in = utc_now.diff(kwargs["expires_at"], abs=False).in_seconds()
+            self.logger.debug("OAuth init| expires_in computed=%ss", self.expires_in)
+
+    @property
+    def logger(self):
+        return self.__logger
 
     @property
     def is_challenge(self) -> bool:

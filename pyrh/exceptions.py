@@ -1,3 +1,4 @@
+# coding=utf-8
 """Exceptions: custom exceptions for library"""
 
 
