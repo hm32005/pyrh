@@ -241,7 +241,20 @@ def test_get_oauth_payload_fresh_request_id_each_call(sm):
 # ---------------------------------------------------------------------------
 
 
-def test_get_mfa_code_from_apw(sm):
+@pytest.fixture
+def _otp_cmd_resolved(monkeypatch):
+    """Pretend the OTP helper binary is discoverable on this host.
+
+    ``_get_mfa_code`` only spawns ``subprocess.run`` when either the
+    ``PYRH_OTP_COMMAND`` env var or ``shutil.which("apw")`` resolves to a
+    path. Tests that exercise the subprocess branch must force that
+    resolution — otherwise they silently skip the branch on CI / Linux
+    hosts that have no ``apw`` on PATH.
+    """
+    monkeypatch.setenv("PYRH_OTP_COMMAND", "/fake/bin/apw")
+
+
+def test_get_mfa_code_from_apw(sm, _otp_cmd_resolved):
     """When apw returns a JSON payload, its code is used."""
     apw_output = json.dumps({"results": [{"code": "987654"}]})
     proc = mock.Mock(returncode=0, stdout=apw_output)
@@ -252,7 +265,7 @@ def test_get_mfa_code_from_apw(sm):
     assert code == "987654"
 
 
-def test_get_mfa_code_apw_nonzero_falls_back_to_input(sm):
+def test_get_mfa_code_apw_nonzero_falls_back_to_input(sm, _otp_cmd_resolved):
     """apw returncode != 0 means the tool wasn't authorized; fall back to input()."""
     proc = mock.Mock(returncode=1, stdout="")
 
@@ -265,7 +278,7 @@ def test_get_mfa_code_apw_nonzero_falls_back_to_input(sm):
     assert code == "424242"  # stripped
 
 
-def test_get_mfa_code_apw_missing_falls_back_to_input(sm):
+def test_get_mfa_code_apw_missing_falls_back_to_input(sm, _otp_cmd_resolved):
     """FileNotFoundError from subprocess.run is caught and we fall back."""
     with (
         mock.patch(
@@ -279,7 +292,7 @@ def test_get_mfa_code_apw_missing_falls_back_to_input(sm):
     assert code == "111111"
 
 
-def test_get_mfa_code_apw_timeout_falls_back_to_input(sm):
+def test_get_mfa_code_apw_timeout_falls_back_to_input(sm, _otp_cmd_resolved):
     """subprocess.TimeoutExpired is caught and we fall back."""
     import subprocess
 
@@ -295,7 +308,7 @@ def test_get_mfa_code_apw_timeout_falls_back_to_input(sm):
     assert code == "222222"
 
 
-def test_get_mfa_code_apw_malformed_json_raises(sm):
+def test_get_mfa_code_apw_malformed_json_raises(sm, _otp_cmd_resolved):
     """Regression: a successful APW exit (returncode 0) that emits malformed
     JSON used to silently fall back to ``input()``, so an operator never saw
     that APW's output contract had been broken. Now we raise an
@@ -316,7 +329,7 @@ def test_get_mfa_code_apw_malformed_json_raises(sm):
     inp.assert_not_called()
 
 
-def test_get_mfa_code_apw_malformed_raises(sm):
+def test_get_mfa_code_apw_malformed_raises(sm, _otp_cmd_resolved):
     """Alternative malformed-shape: APW returned JSON but missing the
     expected `results` key. Same fail-loud contract as
     ``test_get_mfa_code_apw_malformed_json_raises``."""
@@ -332,7 +345,7 @@ def test_get_mfa_code_apw_malformed_raises(sm):
     inp.assert_not_called()
 
 
-def test_get_mfa_code_apw_missing_results_index_raises(sm):
+def test_get_mfa_code_apw_missing_results_index_raises(sm, _otp_cmd_resolved):
     """`results` is present but empty -> IndexError when we try [0]. Same
     contract: raise, don't silently fall back to input()."""
     from pyrh.exceptions import AuthenticationError
@@ -345,6 +358,79 @@ def test_get_mfa_code_apw_missing_results_index_raises(sm):
         with pytest.raises(AuthenticationError, match="APW payload is malformed"):
             sm._get_mfa_code()
     inp.assert_not_called()
+
+
+def test_get_mfa_code_respects_pyrh_otp_command_env_var(sm, monkeypatch):
+    """``PYRH_OTP_COMMAND`` env var overrides the discovered/hardcoded path.
+
+    Regression target: the previous implementation hardcoded
+    ``/opt/homebrew/bin/apw``, which only exists on Apple Silicon macOS with
+    Homebrew. That breaks CI, Linux, and Airflow headless deployments.
+    """
+    apw_output = json.dumps({"results": [{"code": "111222"}]})
+    proc = mock.Mock(returncode=0, stdout=apw_output)
+    monkeypatch.setenv("PYRH_OTP_COMMAND", "/opt/custom/bin/my-otp")
+
+    with mock.patch(
+        "pyrh.models.sessionmanager.subprocess.run", return_value=proc
+    ) as run_mock:
+        code = sm._get_mfa_code()
+
+    assert code == "111222"
+    # The first positional arg to subprocess.run is the argv list.
+    argv = run_mock.call_args.args[0]
+    assert argv[0] == "/opt/custom/bin/my-otp", (
+        f"Expected env-var path, got argv={argv!r}"
+    )
+
+
+def test_get_mfa_code_uses_shutil_which_when_no_env_var(sm, monkeypatch):
+    """Without the env var, ``_get_mfa_code`` resolves via ``shutil.which``.
+
+    This lets Linux / Intel Mac / Airflow hosts where ``apw`` sits in
+    ``/usr/local/bin`` or anywhere else on ``PATH`` work without an
+    explicit config. The hardcoded ``/opt/homebrew/bin/apw`` path would
+    fail on any of those hosts.
+    """
+    monkeypatch.delenv("PYRH_OTP_COMMAND", raising=False)
+    apw_output = json.dumps({"results": [{"code": "333444"}]})
+    proc = mock.Mock(returncode=0, stdout=apw_output)
+
+    with (
+        mock.patch(
+            "pyrh.models.sessionmanager.shutil.which", return_value="/usr/local/bin/apw"
+        ) as which_mock,
+        mock.patch(
+            "pyrh.models.sessionmanager.subprocess.run", return_value=proc
+        ) as run_mock,
+    ):
+        code = sm._get_mfa_code()
+
+    assert code == "333444"
+    which_mock.assert_called_once_with("apw")
+    argv = run_mock.call_args.args[0]
+    assert argv[0] == "/usr/local/bin/apw"
+
+
+def test_get_mfa_code_falls_back_to_input_when_otp_command_not_resolved(
+    sm, monkeypatch
+):
+    """When neither env var nor ``shutil.which`` find an OTP binary, prompt."""
+    monkeypatch.delenv("PYRH_OTP_COMMAND", raising=False)
+
+    with (
+        mock.patch(
+            "pyrh.models.sessionmanager.shutil.which", return_value=None
+        ),
+        mock.patch(
+            "pyrh.models.sessionmanager.subprocess.run"
+        ) as run_mock,
+        mock.patch("builtins.input", return_value="555666"),
+    ):
+        code = sm._get_mfa_code()
+
+    assert code == "555666"
+    run_mock.assert_not_called()  # no binary found -> never spawn subprocess
 
 
 # ---------------------------------------------------------------------------

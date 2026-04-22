@@ -3,6 +3,8 @@
 import json
 import logging
 import logging.config
+import os
+import shutil
 import subprocess
 import uuid
 from logging import Logger
@@ -407,35 +409,61 @@ class SessionManager(BaseModel):
         return (data, res) if return_response else data
 
     def _get_mfa_code(self):
-        # Try APW first. The two failure modes are intentionally split:
-        #
-        # 1. APW unavailable / timed out (FileNotFoundError, TimeoutExpired):
-        #    the binary isn't on this host or hung. Fall back to input() so
-        #    the user can still complete MFA.
-        # 2. APW returned malformed output (JSONDecodeError, KeyError,
-        #    IndexError): the tool is present but its contract is broken —
-        #    e.g. a security-relevant output-format change. Refuse to fall
-        #    back to interactive input because the operator needs to see
-        #    and investigate the misbehaviour, not silently retype a code.
-        try:
-            get_otp_proc = subprocess.run(
-                ["/opt/homebrew/bin/apw", "otp", "get", "robinhood.com"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if get_otp_proc.returncode == 0:
-                try:
-                    result_json = json.loads(get_otp_proc.stdout)
-                    return result_json["results"][0]["code"]
-                except (json.JSONDecodeError, KeyError, IndexError) as e:
-                    self.logger.error("APW returned malformed payload: %s", e)
-                    raise AuthenticationError(
-                        "APW payload is malformed; refusing to fall back to "
-                        "interactive input"
-                    ) from e
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            self.logger.warning("APW unavailable, falling back to input(): %s", e)
+        """Resolve the MFA/OTP code.
+
+        Resolution order for the OTP helper binary:
+
+        1. ``PYRH_OTP_COMMAND`` environment variable — absolute path to an
+           executable whose stdout is JSON of the shape
+           ``{"results": [{"code": "<6-digit-otp>"}]}``. Use this on hosts
+           where the helper lives outside ``PATH`` (CI images, service
+           accounts, Airflow workers).
+        2. ``shutil.which("apw")`` — portable discovery of the Apple
+           Password Manager (``apw``) helper wherever it lives on the
+           operator's ``PATH`` (Apple Silicon, Intel macOS, or Linux
+           containers with a PATH-installed ``apw``).
+        3. Interactive ``input()`` prompt — last-resort fallback when no
+           helper binary was found.
+
+        The two failure modes of the helper are intentionally split:
+
+        - helper unavailable / timed out (``FileNotFoundError``,
+          ``subprocess.TimeoutExpired``): treat as "not installed here"
+          and fall back to ``input()``.
+        - helper ran but emitted malformed JSON / missing keys: raise
+          ``AuthenticationError`` so the operator investigates the
+          broken contract rather than silently retyping an OTP.
+
+        Rationale: the previous implementation hardcoded
+        ``/opt/homebrew/bin/apw``. That path only exists on Apple Silicon
+        macOS with Homebrew — it breaks CI, Linux, and headless Airflow
+        deployments.
+        """
+        otp_cmd = os.environ.get("PYRH_OTP_COMMAND") or shutil.which("apw")
+        if otp_cmd:
+            try:
+                get_otp_proc = subprocess.run(
+                    [otp_cmd, "otp", "get", "robinhood.com"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if get_otp_proc.returncode == 0:
+                    try:
+                        result_json = json.loads(get_otp_proc.stdout)
+                        return result_json["results"][0]["code"]
+                    except (json.JSONDecodeError, KeyError, IndexError) as e:
+                        self.logger.error("OTP helper returned malformed payload: %s", e)
+                        raise AuthenticationError(
+                            "APW payload is malformed; refusing to fall back to "
+                            "interactive input"
+                        ) from e
+            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                self.logger.warning(
+                    "OTP helper %s unavailable, falling back to input(): %s",
+                    otp_cmd,
+                    e,
+                )
 
         # Fall back to manual input
         self.logger.info("Requesting manual MFA code entry")
