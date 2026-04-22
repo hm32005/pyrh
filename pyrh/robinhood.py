@@ -148,7 +148,10 @@ class Robinhood(InstrumentManager, SessionManager):
         return data
 
     def get_stock_marketdata(self, instruments: list[Any]) -> dict[str, Any]:
-        info = self.get_url(urls.market_data() / "quotes/?instruments=" / ",".join(instruments))
+        # Delegate URL construction to ``urls.market_data_quotes`` so yarl
+        # builds the query string correctly; the previous inline form was
+        # broken (path segments containing ``?`` + unreturned value).
+        info = self.get_url(urls.market_data_quotes(instruments))
         return info["results"]
 
     def get_historical_quotes(self, stock, interval, span, bounds=Bounds.REGULAR):

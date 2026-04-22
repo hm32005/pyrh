@@ -120,3 +120,52 @@ def test_options_builder_has_expected_query_params():
     assert u.query["state"] == "active"
     assert u.query["tradability"] == "tradable"
     assert u.query["type"] == "call"
+
+
+def test_market_data_is_callable():
+    """`urls.market_data` must be a regular callable, not a `property` object.
+
+    The `@property` decorator on a module-level function makes ``market_data``
+    a ``property`` instance (not callable), so every caller that does
+    ``urls.market_data(...)`` raises ``TypeError: 'property' object is not
+    callable``.
+    """
+    from pyrh import urls
+
+    assert callable(urls.market_data), (
+        f"urls.market_data must be callable, got {type(urls.market_data).__name__!r}"
+    )
+    u = urls.market_data("opt_id")
+    assert "opt_id" in str(u)
+
+
+def test_market_data_none_returns_base():
+    """Calling ``market_data()`` with no argument returns the base URL.
+
+    The buggy branch order previously produced ``.../marketdata/None/`` when
+    ``option_id`` was missing.
+    """
+    from pyrh import urls
+
+    assert str(urls.market_data()) == str(urls.MARKET_DATA_BASE)
+
+
+def test_market_data_with_id():
+    """Calling ``market_data("abc")`` appends ``abc/`` to the base URL."""
+    from pyrh import urls
+
+    assert str(urls.market_data("abc")) == f"{API_BASE}/marketdata/abc/"
+
+
+def test_market_data_quotes_returns_url_with_query():
+    """``market_data_quotes`` must return a URL with ``instruments`` query param.
+
+    Previously the function had no ``return`` statement and used invalid yarl
+    path concatenation, so callers got ``None`` back.
+    """
+    from pyrh import urls
+
+    u = urls.market_data_quotes(["AAPL", "TSLA"])
+    assert isinstance(u, URL)
+    assert u.query["instruments"] == "AAPL,TSLA"
+    assert str(u).startswith(f"{API_BASE}/marketdata/")

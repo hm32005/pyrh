@@ -199,21 +199,45 @@ def options(chain_id: str, dates: str, option_type: str) -> URL:
     )
 
 
-@property
 def market_data(option_id: Optional[str] = None) -> URL:
     """Build market data endpoint.
 
     Args:
-        option_id: the id of the option.
+        option_id: the id of the option. When omitted, the base market-data URL
+            is returned.
 
     Returns:
-        A constructed URL for market data for a particular `option_id`.
+        A constructed URL for market data for a particular ``option_id``, or
+        :data:`MARKET_DATA_BASE` when no id is supplied.
+
+    Note:
+        Previously decorated ``@property`` (see commit history), which made
+        this module-level function a non-callable ``property`` object; every
+        call site raised ``TypeError``. The branches were also inverted,
+        producing ``.../marketdata/None/`` when called with no argument. Both
+        issues are fixed here.
     """
     if option_id is None:
-        return MARKET_DATA_BASE / f"{option_id}/"
-    else:
         return MARKET_DATA_BASE
+    else:
+        return MARKET_DATA_BASE / f"{option_id}/"
 
 
-def market_data_quotes(options_instruments):
-    market_data() / "quotes/?instruments=" / ",".join(options_instruments)
+def market_data_quotes(options_instruments) -> URL:
+    """Build a batched market-data quotes URL.
+
+    Args:
+        options_instruments: An iterable of option instrument ids to fetch
+            quotes for.
+
+    Returns:
+        A URL of the form ``/marketdata/quotes/?instruments=<id1>,<id2>,...``.
+
+    Note:
+        The previous implementation had no ``return`` statement and used
+        invalid yarl path concatenation (``URL / "quotes/?instruments=" / ...``),
+        so callers got ``None`` back.
+    """
+    return (MARKET_DATA_BASE / "quotes/").with_query(
+        instruments=",".join(options_instruments)
+    )
