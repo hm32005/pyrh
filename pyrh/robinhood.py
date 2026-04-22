@@ -203,13 +203,22 @@ class Robinhood(InstrumentManager, SessionManager):
 
         return self.get_url(urls.news(stock.upper()))
 
-    @property
-    def watchlists(self):
+    def get_watchlists(self):
         """Fetch watchlists endpoint and queries for
-        each instrumented result aka stock details returned from the watchlist
+        each instrumented result aka stock details returned from the watchlist.
 
         Returns:
-            (:obj:`dict`): values returned from `watchlists` and `instrument` endpoints
+            (:obj:`dict`): values returned from ``watchlists`` and
+                ``instrument`` endpoints.
+
+        Note:
+            Do NOT convert this back to ``@property``. A prior refactor did
+            exactly that — reintroducing the same anti-pattern that commit
+            ``081807c`` removed from ``fundamentals``. Property getters
+            receive only ``self``, so any future argument (e.g. watchlist
+            name filter) would be silently discarded, and existing callers
+            using ``rh.get_watchlists()`` would break with
+            ``TypeError: 'list' object is not callable``.
         """
 
         res = []
@@ -220,6 +229,12 @@ class Robinhood(InstrumentManager, SessionManager):
                 res.append(self.get_url(rec["instrument"]))
 
         return res
+
+    # Back-compat alias for callers that used the short name introduced in
+    # the buggy @property revision. Kept as a regular unbound method so it
+    # behaves identically to ``get_watchlists``. Do not remove without a
+    # deprecation cycle.
+    watchlists = get_watchlists
 
     def print_quote(self, stock=""):  # pragma: no cover
         """Print quote information.
