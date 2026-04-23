@@ -13,6 +13,7 @@ from pyrh import urls
 from pyrh.exceptions import (
     InvalidOptionId,
     InvalidTickerSymbol,
+    RobinhoodOrderSubmissionError,
     RobinhoodRateLimitError,
     RobinhoodResourceError,
     RobinhoodServerError,
@@ -1767,11 +1768,12 @@ class Robinhood(InstrumentManager, SessionManager):
             try:
                 order = self.get_url(urls.orders(order_id))
             except requests.exceptions.HTTPError as err_msg:
-                raise ValueError(
-                    "Failed to get Order for ID: "
-                    + order_id
-                    + "\n Error message: "
-                    + repr(err_msg)
+                # Issue #148: was ``raise ValueError(...)``; now dispatches
+                # via ``_raise_for_http_error`` so callers can distinguish
+                # 5xx / 429 / 4xx by exception class. Breaks the legacy
+                # ``ValueError`` contract — see PR #148 release note.
+                _raise_for_http_error(
+                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
                 )
 
             if order.get("cancel") is not None:
@@ -1785,6 +1787,10 @@ class Robinhood(InstrumentManager, SessionManager):
                         res = self.post(order["cancel"])
                         return res
                     except requests.exceptions.HTTPError as err_msg:
+                        # Issue #147 (not #148): POST-path dispatcher wiring
+                        # is tracked separately. Kept as ``raise ValueError``
+                        # intentionally until #147 lands; #148 scope is
+                        # the two ``get_url`` call sites only.
                         raise ValueError(
                             "Failed to cancel order ID: "
                             + order_id
@@ -1797,11 +1803,9 @@ class Robinhood(InstrumentManager, SessionManager):
             try:
                 order = self.get_url(urls.orders(order_id))
             except requests.exceptions.HTTPError as err_msg:
-                raise ValueError(
-                    "Failed to get Order for ID: "
-                    + order_id
-                    + "\n Error message: "
-                    + repr(err_msg)
+                # Issue #148 (dict-branch twin of the str-branch site above).
+                _raise_for_http_error(
+                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
                 )
 
             if order.get("cancel") is not None:

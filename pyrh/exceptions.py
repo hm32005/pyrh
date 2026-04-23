@@ -80,6 +80,37 @@ class RobinhoodResourceError(PyrhException):
     pass
 
 
+class RobinhoodOrderSubmissionError(PyrhException):
+    """4xx errors during order submission, modification, or cancellation.
+
+    Introduced by investment-system-docs issue #148 to replace the legacy
+    ``raise ValueError`` pattern in ``Robinhood.cancel_order`` so callers
+    can distinguish permanent 4xx failures (bad order id, account
+    restriction, insufficient funds) from transient 5xx / 429 failures
+    (server outage, rate limit) by exception class rather than by parsing
+    string messages.
+
+    Note: when retrying a 5xx on order-submission callers MUST verify
+    whether the original request actually went through (idempotency key +
+    order-status query). The dispatcher converts 5xx to
+    ``RobinhoodServerError``; this class is for 4xx semantics only (e.g.
+    invalid order id, account restriction, insufficient funds).
+
+    Inherits from ``PyrhException`` (i.e. bare ``Exception``), NOT
+    ``ValueError``. The break with the legacy ``ValueError`` contract is
+    intentional: callers doing ``except ValueError`` on cancel-order /
+    submit-order results will need to migrate to this class (or the
+    broader ``PyrhException``). See PR description for #148 for release
+    notes.
+
+    Paired with issue #147 (POST-path order-submission dispatcher), which
+    will reuse this class for ``submit_buy_order``, ``submit_sell_order``,
+    and ``place_order``.
+    """
+
+    pass
+
+
 class RobinhoodRateLimitError(PyrhException):
     """Robinhood returned HTTP 429 (rate-limited).
 
