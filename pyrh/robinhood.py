@@ -22,6 +22,7 @@ from pyrh.models.sessionmanager import (
     SessionManager,
     SessionManagerSchema,
 )
+from pyrh.util import coalesce_deprecated_kwarg
 
 
 # TODO: re-enable InvalidOptionId when broken endpoint function below is fixed
@@ -734,7 +735,12 @@ class Robinhood(InstrumentManager, SessionManager):
     ###########################################################################
 
     def place_market_buy_order(
-            self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing market buy orders
 
@@ -747,11 +753,16 @@ class Robinhood(InstrumentManager, SessionManager):
             symbol (str): The ticker symbol of the instrument
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             quantity (int): Number of shares to buy
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_buy_order(
             order_type="market",
             trigger="immediate",
@@ -769,6 +780,7 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force=None,
             price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing limit buy orders
 
@@ -782,11 +794,16 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             price (float): The max price you're willing to pay per share
             quantity (int): Number of shares to buy
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_buy_order(
             order_type="limit",
             trigger="immediate",
@@ -805,6 +822,7 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force=None,
             stop_price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing stop loss buy orders
 
@@ -818,11 +836,16 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             stop_price (float): The price at which this becomes a market order
             quantity (int): Number of shares to buy
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_buy_order(
             order_type="market",
             trigger="stop",
@@ -842,6 +865,7 @@ class Robinhood(InstrumentManager, SessionManager):
             stop_price=None,
             price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing stop limit buy orders
 
@@ -856,11 +880,16 @@ class Robinhood(InstrumentManager, SessionManager):
             stop_price (float): The price at which this becomes a limit order
             price (float): The max price you're willing to pay per share
             quantity (int): Number of shares to buy
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_buy_order(
             order_type="limit",
             trigger="stop",
@@ -874,7 +903,12 @@ class Robinhood(InstrumentManager, SessionManager):
         )
 
     def place_market_sell_order(
-            self, instrument_url=None, symbol=None, time_in_force=None, quantity=None
+            self,
+            instrument_url=None,
+            symbol=None,
+            time_in_force=None,
+            quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing market sell orders
 
@@ -887,11 +921,16 @@ class Robinhood(InstrumentManager, SessionManager):
             symbol (str): The ticker symbol of the instrument
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             quantity (int): Number of shares to sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_sell_order(
             order_type="market",
             trigger="immediate",
@@ -909,6 +948,7 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force=None,
             price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing limit sell orders
 
@@ -922,11 +962,16 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             price (float): The minimum price you're willing to get per share
             quantity (int): Number of shares to sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_sell_order(
             order_type="limit",
             trigger="immediate",
@@ -945,6 +990,7 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force=None,
             stop_price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing stop loss sell orders
 
@@ -958,11 +1004,16 @@ class Robinhood(InstrumentManager, SessionManager):
             time_in_force (str): 'GFD' or 'GTC' (day or until cancelled)
             stop_price (float): The price at which this becomes a market order
             quantity (int): Number of shares to sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_sell_order(
             order_type="market",
             trigger="stop",
@@ -982,6 +1033,7 @@ class Robinhood(InstrumentManager, SessionManager):
             price=None,
             stop_price=None,
             quantity=None,
+            instrument_URL=None,
     ):
         """Wrapper for placing stop limit sell orders
 
@@ -996,11 +1048,16 @@ class Robinhood(InstrumentManager, SessionManager):
             stop_price (float): The price at which this becomes a limit order
             price (float): The max price you're willing to get per share
             quantity (int): Number of shares to sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
         return self.submit_sell_order(
             order_type="limit",
             trigger="stop",
@@ -1025,6 +1082,7 @@ class Robinhood(InstrumentManager, SessionManager):
             stop_price=None,
             quantity=None,
             side=None,
+            instrument_URL=None,
     ):
         """Submits order to Robinhood
 
@@ -1053,11 +1111,16 @@ class Robinhood(InstrumentManager, SessionManager):
                                 market or limit order
             quantity (int): The number of shares to buy/sell
             side (str): BUY or sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
 
         # Used for default price input
         # Price is required, so we use the current bid price if it is not specified
@@ -1198,6 +1261,7 @@ class Robinhood(InstrumentManager, SessionManager):
             stop_price=None,
             quantity=None,
             side=None,
+            instrument_URL=None,
     ):
         """Submits buy order to Robinhood
 
@@ -1226,11 +1290,16 @@ class Robinhood(InstrumentManager, SessionManager):
                                 market or limit order
             quantity (int): The number of shares to buy/sell
             side (str): BUY or sell
+            instrument_URL (str): DEPRECATED — legacy name for
+                ``instrument_url``; forwarded with a ``DeprecationWarning``.
 
         Returns:
             (:obj:`requests.request`): result from `orders` put command
 
         """
+        instrument_url = coalesce_deprecated_kwarg(
+            "instrument_url", instrument_url, "instrument_URL", instrument_URL
+        )
 
         # Used for default price input
         # Price is required, so we use the current ask price if it is not specified

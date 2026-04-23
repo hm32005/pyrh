@@ -1,4 +1,5 @@
 # coding=utf-8
+from .deprecation import coalesce_deprecated_kwarg
 from .http_utils import headers, robinhood_headers, JSON_ENCODING
 
 # NOTE: every entry in ``__all__`` MUST be a string literal naming an
@@ -6,4 +7,9 @@ from .http_utils import headers, robinhood_headers, JSON_ENCODING
 # quotes, which silently put the *value* ``"application/json"`` into
 # ``__all__`` instead of the *name* — so ``from pyrh.util import *`` never
 # bound ``JSON_ENCODING``.
-__all__ = ["headers", "robinhood_headers", "JSON_ENCODING"]
+__all__ = [
+    "coalesce_deprecated_kwarg",
+    "headers",
+    "robinhood_headers",
+    "JSON_ENCODING",
+]
