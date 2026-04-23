@@ -10,7 +10,12 @@ import requests
 from yarl import URL
 
 from pyrh import urls
-from pyrh.exceptions import InvalidOptionId, InvalidTickerSymbol
+from pyrh.exceptions import (
+    InvalidOptionId,
+    InvalidTickerSymbol,
+    RobinhoodRateLimitError,
+    RobinhoodServerError,
+)
 from pyrh.models.instrument import InstrumentManager
 from pyrh.models.portfolio import PortfolioSchema
 from pyrh.models.sessionmanager import (
@@ -34,6 +39,41 @@ class Transaction(Enum):
 
     BUY = "buy"
     SELL = "sell"
+
+
+def _raise_for_quote_http_error(err: requests.exceptions.HTTPError) -> None:
+    """Translate a ``requests.HTTPError`` from a quote/fundamentals call into
+    the right pyrh exception based on status code.
+
+    See investment-system-docs issue #79 for context: previously every HTTP
+    error was masked as ``InvalidTickerSymbol``, so users thought their
+    ticker was bad when Robinhood was actually down or rate-limiting.
+
+    Dispatch:
+        * 5xx              -> ``RobinhoodServerError``
+        * 429              -> ``RobinhoodRateLimitError`` (with ``Retry-After``)
+        * any other 4xx    -> ``InvalidTickerSymbol`` (unchanged behaviour)
+        * no ``.response`` -> ``InvalidTickerSymbol`` (defensive fallback)
+
+    Always re-raises — never returns — and uses ``from None`` so the HTTP
+    stack trace does not leak to callers (matches the pattern shipped for
+    ``_try_refresh`` in the auth refactor).
+    """
+    response = getattr(err, "response", None)
+    status_code = getattr(response, "status_code", None) if response is not None else None
+
+    if status_code is not None and 500 <= status_code < 600:
+        raise RobinhoodServerError(status_code) from None
+    if status_code == 429:
+        retry_after_raw = (
+            response.headers.get("Retry-After") if response is not None else None
+        )
+        try:
+            retry_after = int(retry_after_raw) if retry_after_raw is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
+        raise RobinhoodRateLimitError(retry_after=retry_after) from None
+    raise InvalidTickerSymbol() from None
 
 
 class Robinhood(InstrumentManager, SessionManager):
@@ -80,8 +120,8 @@ class Robinhood(InstrumentManager, SessionManager):
         # Check for validity of symbol
         try:
             data = self.get_url(url)
-        except requests.exceptions.HTTPError:
-            raise InvalidTickerSymbol()
+        except requests.exceptions.HTTPError as e:
+            _raise_for_quote_http_error(e)
 
         return data
 
@@ -103,8 +143,8 @@ class Robinhood(InstrumentManager, SessionManager):
 
         try:
             data = self.get_url(url)
-        except requests.exceptions.HTTPError:
-            raise InvalidTickerSymbol()
+        except requests.exceptions.HTTPError as e:
+            _raise_for_quote_http_error(e)
 
         return data["results"]
 
@@ -631,8 +671,8 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
             return data
-        except requests.exceptions.HTTPError:
-            raise InvalidTickerSymbol()
+        except requests.exceptions.HTTPError as e:
+            _raise_for_quote_http_error(e)
 
     ###########################################################################
     #                           PORTFOLIOS DATA
