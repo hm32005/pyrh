@@ -817,7 +817,7 @@ class Robinhood(InstrumentManager, SessionManager):
             _raise_for_http_error(
                 e,
                 fallback_exc=InvalidOptionId,
-                context={"stock": stock, "option_type": option_type},
+                context={"ticker": stock, "option_type": option_type},
             )
 
     def get_option_market_data(self, option_id):
@@ -902,7 +902,7 @@ class Robinhood(InstrumentManager, SessionManager):
             _raise_for_http_error(
                 e,
                 fallback_exc=InvalidOptionId,
-                context={"symbol": symbol},
+                context={"ticker": symbol},
             )
 
     def get_option_quote(self, symbol, strike, expiry, otype, state="active"):
@@ -928,10 +928,10 @@ class Robinhood(InstrumentManager, SessionManager):
                 e,
                 fallback_exc=InvalidOptionId,
                 context={
-                    "symbol": symbol,
+                    "ticker": symbol,
                     "strike": strike,
                     "expiry": expiry,
-                    "otype": otype,
+                    "option_type": otype,
                 },
             )
         if not results:
@@ -1614,7 +1614,7 @@ class Robinhood(InstrumentManager, SessionManager):
                 err_msg,
                 fallback_exc=RobinhoodOrderSubmissionError,
                 context={
-                    "symbol": symbol,
+                    "ticker": symbol,
                     "side": side,
                     "quantity": quantity,
                 },
@@ -1808,7 +1808,7 @@ class Robinhood(InstrumentManager, SessionManager):
                 err_msg,
                 fallback_exc=RobinhoodOrderSubmissionError,
                 context={
-                    "symbol": symbol,
+                    "ticker": symbol,
                     "side": side,
                     "quantity": quantity,
                 },
@@ -1880,7 +1880,7 @@ class Robinhood(InstrumentManager, SessionManager):
                 err_msg,
                 fallback_exc=RobinhoodOrderSubmissionError,
                 context={
-                    "symbol": instrument.get("symbol"),
+                    "ticker": instrument.get("symbol"),
                     "quantity": quantity,
                     "side": transaction.name.lower(),
                 },

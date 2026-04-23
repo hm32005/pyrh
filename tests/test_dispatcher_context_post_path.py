@@ -132,5 +132,7 @@ def test_place_order_500_message_carries_context():
 
     msg = str(exc_info.value)
     assert "500" in msg
-    assert "symbol=TSLA" in msg
+    # Issue #160: context key normalised from "symbol" to "ticker" across
+    # all dispatcher sites for naming consistency.
+    assert "ticker=TSLA" in msg
     assert "quantity=5" in msg

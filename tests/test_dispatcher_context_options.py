@@ -68,7 +68,11 @@ def test_get_option_market_data_500_message_carries_option_id():
 # ---------------------------------------------------------------------------
 
 
-def test_get_option_chain_id_404_message_carries_symbol():
+def test_get_option_chain_id_404_message_carries_ticker():
+    """Issue #160: context key normalised from ``symbol`` to ``ticker``
+    to match the convention used in other dispatcher sites
+    (``quote_data``, ``get_fundamentals``, Phase A/B/C, options inner)
+    and finorch/signal_writer downstream naming."""
     from pyrh.exceptions import InvalidOptionId
 
     rh = _fresh_robinhood()
@@ -80,18 +84,22 @@ def test_get_option_chain_id_404_message_carries_symbol():
         with pytest.raises(InvalidOptionId) as exc_info:
             rh.get_option_chain_id("TSLA")
 
-    assert "symbol=TSLA" in str(exc_info.value)
+    assert "ticker=TSLA" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
-# get_options — context: {"stock", "option_type"}
+# get_options — context: {"ticker", "option_type"}   (#160: stock -> ticker)
 # ---------------------------------------------------------------------------
 
 
-def test_get_options_404_message_carries_stock_and_type():
+def test_get_options_404_message_carries_ticker_and_type():
     """``get_options`` calls quote_data first; we let that succeed and fail
     on the subsequent get_url so we exit through the get_options dispatcher
-    (not quote_data's) and see the stock+option_type context."""
+    (not quote_data's) and see the ticker+option_type context.
+
+    Issue #160: context keys normalised — ``stock`` -> ``ticker`` for
+    consistency with the rest of the dispatcher sites.
+    """
     from pyrh.exceptions import InvalidOptionId
 
     rh = _fresh_robinhood()
@@ -108,7 +116,7 @@ def test_get_options_404_message_carries_stock_and_type():
                 rh.get_options("TSLA", ["2024-12-20"], "call")
 
     msg = str(exc_info.value)
-    assert "stock=TSLA" in msg
+    assert "ticker=TSLA" in msg
     assert "option_type=call" in msg
 
 
