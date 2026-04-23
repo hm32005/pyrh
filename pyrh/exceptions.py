@@ -60,6 +60,26 @@ class RobinhoodServerError(PyrhException):
         super().__init__(message)
 
 
+class RobinhoodResourceError(PyrhException):
+    """Robinhood returned a 4xx status on a user-resource endpoint.
+
+    Raised on trading / portfolio / watchlist endpoints where the legacy
+    ``InvalidTickerSymbol`` fallback doesn't fit semantically — those
+    endpoints don't take a ticker, so a "bad ticker" signal would confuse
+    callers. ``RobinhoodResourceError`` covers 4xx-not-429 responses on
+    user-owned resources such as ``portfolio``, ``order_history``,
+    ``dividends``, ``positions``, ``securities_owned``, and
+    ``get_watchlists``.
+
+    See investment-system-docs issue #137 Phase A for context: Phase A wires
+    the shared HTTPError dispatcher onto those 6 methods, and needed a
+    semantically-neutral 4xx fallback distinct from ``InvalidTickerSymbol``
+    (quotes/fundamentals) and ``InvalidOptionId`` (options).
+    """
+
+    pass
+
+
 class RobinhoodRateLimitError(PyrhException):
     """Robinhood returned HTTP 429 (rate-limited).
 

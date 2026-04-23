@@ -14,6 +14,7 @@ from pyrh.exceptions import (
     InvalidOptionId,
     InvalidTickerSymbol,
     RobinhoodRateLimitError,
+    RobinhoodResourceError,
     RobinhoodServerError,
 )
 from pyrh.models.instrument import InstrumentManager
@@ -284,14 +285,19 @@ class Robinhood(InstrumentManager, SessionManager):
             ``TypeError: 'list' object is not callable``.
         """
 
-        res = []
-        watchlist = self.get_url(urls.WATCHLISTS)
-        if watchlist and "results" in watchlist:
-            data = self.get_url(watchlist["results"][0]["url"])
-            for rec in data["results"]:
-                res.append(self.get_url(rec["instrument"]))
-
-        return res
+        # Issue #137 Phase A: wrap every get_url site so 5xx/429 surface as
+        # RobinhoodServerError / RobinhoodRateLimitError instead of a raw
+        # HTTPError leaking to the caller.
+        try:
+            res = []
+            watchlist = self.get_url(urls.WATCHLISTS)
+            if watchlist and "results" in watchlist:
+                data = self.get_url(watchlist["results"][0]["url"])
+                for rec in data["results"]:
+                    res.append(self.get_url(rec["instrument"]))
+            return res
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     # Back-compat alias for callers that used the short name introduced in
     # the buggy @property revision. Kept as a regular unbound method so it
@@ -747,7 +753,11 @@ class Robinhood(InstrumentManager, SessionManager):
     def portfolio(self):
         """Returns the user's portfolio data"""
 
-        return self.get_url(urls.PORTFOLIOS, schema=PortfolioSchema())
+        # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
+        try:
+            return self.get_url(urls.PORTFOLIOS, schema=PortfolioSchema())
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def order_history(self, order_id=None):
         """Wrapper for portfolios
@@ -759,7 +769,11 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        return self.get_url(urls.orders(order_id))
+        # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
+        try:
+            return self.get_url(urls.orders(order_id))
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def dividends(self):
         """Wrapper for portfolios
@@ -769,7 +783,11 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        return self.get_url(urls.DIVIDENDS)
+        # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
+        try:
+            return self.get_url(urls.DIVIDENDS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     ###########################################################################
     #                           POSITIONS DATA
@@ -783,7 +801,11 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        return self.get_url(urls.POSITIONS)
+        # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
+        try:
+            return self.get_url(urls.POSITIONS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def securities_owned(self):
         """Returns list of securities' symbols that the user has shares in
@@ -793,7 +815,11 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        return self.get_url(str(urls.POSITIONS) + "?nonzero=true")
+        # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
+        try:
+            return self.get_url(str(urls.POSITIONS) + "?nonzero=true")
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     ###########################################################################
     #                               PLACE ORDER
