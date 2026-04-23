@@ -284,6 +284,98 @@ EXEMPT_UNWRAPPED_GET_URL_METHODS = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Surface-scan AST helpers (module-level so they are unit-testable).
+#
+# #144 tightened these from the previous inline definitions by replacing
+# the loose ``_inside_try`` (any ast.Try ancestor) with
+# ``_inside_try_with_dispatcher`` (nearest enclosing Try's handlers must
+# invoke ``_raise_for_http_error``). See the #144 test block for the
+# boundary cases pinned against these helpers.
+# ---------------------------------------------------------------------------
+
+
+def _is_self_get_url_call(node):
+    """True iff ``node`` is ``self.get_url(...)``."""
+    import ast
+
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr != "get_url":
+        return False
+    value = func.value
+    if not isinstance(value, ast.Name):
+        return False
+    return value.id == "self"
+
+
+def _handler_calls_dispatcher(handler):
+    """True iff ``except`` handler body invokes ``_raise_for_http_error``.
+
+    Accepts both bare-name (``_raise_for_http_error(e)``) and attribute
+    forms (``self._raise_for_http_error(e)`` /
+    ``pyrh.robinhood._raise_for_http_error(e)``) — anything whose
+    call target's trailing segment is ``_raise_for_http_error``.
+    """
+    import ast
+
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Name) and fn.id == "_raise_for_http_error":
+            return True
+        if isinstance(fn, ast.Attribute) and fn.attr == "_raise_for_http_error":
+            return True
+    return False
+
+
+def _inside_try_with_dispatcher(method, target):
+    """True iff ``target`` is in the body of some ``ast.Try`` inside
+    ``method`` AND at least one of that Try's except handlers invokes
+    ``_raise_for_http_error``.
+
+    Walks Try nodes in the method; for each, checks whether ``target``
+    is a descendant of the Try's body (not its handlers / else /
+    finalbody — those are NOT protected by the dispatcher). If the body
+    contains the call, the handlers must dispatch for the result to be
+    True. Nested try/except is supported: any enclosing try whose
+    handlers dispatch counts as covered.
+
+    Tightening rationale (#144): the prior ``_inside_try`` helper only
+    checked Try ancestry (any ast.Try containing the call anywhere
+    inside), which let through methods whose except handler did NOT
+    dispatch -- e.g. ``try: self.get_url(...) except HTTPError: raise
+    ValueError(...)``. That is the same-shape weakness as #136.
+    """
+    import ast
+
+    def _body_contains(try_node, call):
+        # Walk only the ``try`` body (protected region), not handlers /
+        # else / finalbody. A call inside an except handler is NOT
+        # covered by the dispatcher for THAT try.
+        for stmt in try_node.body:
+            for descendant in ast.walk(stmt):
+                if descendant is call:
+                    return True
+        return False
+
+    for try_node in ast.walk(method):
+        if not isinstance(try_node, ast.Try):
+            continue
+        if not _body_contains(try_node, target):
+            continue
+        for handler in try_node.handlers:
+            if _handler_calls_dispatcher(handler):
+                return True
+        # Call is in this try's body but no handler dispatches. Keep
+        # walking in case an OUTER try (nested) dispatches.
+    return False
+
+
 def test_no_unwrapped_get_url_call_sites_on_robinhood_class():
     """Surface scan: no ``Robinhood`` method may call ``self.get_url(...)``
     outside a ``try`` block unless explicitly allowlisted.
@@ -316,59 +408,22 @@ def test_no_unwrapped_get_url_call_sites_on_robinhood_class():
     )
     assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
 
-    def _is_self_get_url_call(node: ast.AST) -> bool:
-        """True iff ``node`` is ``self.get_url(...)``."""
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        if not isinstance(func, ast.Attribute):
-            return False
-        if func.attr != "get_url":
-            return False
-        value = func.value
-        if not isinstance(value, ast.Name):
-            return False
-        return value.id == "self"
-
-    def _inside_try(method: ast.FunctionDef, target: ast.Call) -> bool:
-        """True iff ``target`` is a descendant of some ``ast.Try`` node
-        whose ``try`` body lives inside ``method``."""
-        for node in ast.walk(method):
-            if isinstance(node, ast.Try):
-                # Walk each Try's body + handlers + else + finalbody; if
-                # target is among those descendants, it's inside a try.
-                for child in ast.walk(node):
-                    if child is target:
-                        return True
-        return False
-
-    def _has_direct_dispatcher_call(method: ast.FunctionDef) -> bool:
-        """True iff method body directly invokes ``_raise_for_http_error``.
-
-        Defensive: a method could conceivably dispatch manually (no try
-        block, but explicit call to the helper). None of the current
-        methods do this, but the Phase-A guard allows it, so mirror that.
-        """
-        for node in ast.walk(method):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == "_raise_for_http_error":
-                    return True
-        return False
-
+    # #144: route through the module-level tightened helper. The previous
+    # inline ``_inside_try`` returned True for any ast.Try ancestor,
+    # which let through try/except blocks whose handler did NOT invoke
+    # ``_raise_for_http_error`` (e.g. the pre-PR #13 shape of
+    # ``cancel_order``). ``_inside_try_with_dispatcher`` requires the
+    # enclosing try's except handlers to dispatch.
     offenders = []  # list of (method_name, line_no)
     for method in ast.walk(robinhood_class):
         if not isinstance(method, ast.FunctionDef):
             continue
         if method.name in EXEMPT_UNWRAPPED_GET_URL_METHODS:
             continue
-        has_dispatcher = _has_direct_dispatcher_call(method)
         for node in ast.walk(method):
             if not _is_self_get_url_call(node):
                 continue
-            if _inside_try(method, node):
-                continue
-            if has_dispatcher:
-                # Method dispatches manually somewhere — trust it.
+            if _inside_try_with_dispatcher(method, node):
                 continue
             offenders.append((method.name, node.lineno))
 
