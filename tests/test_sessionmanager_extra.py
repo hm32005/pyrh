@@ -144,6 +144,18 @@ def test_session_headers_do_not_alias_module_headers():
     assert "Authorization" not in HEADERS
 
 
+def test_module_level_HEADERS_is_read_only():
+    """Belt-and-braces: the module-level ``HEADERS`` mapping must refuse
+    direct item assignment, so a future contributor cannot reintroduce the
+    cross-instance leak by doing ``pyrh.models.sessionmanager.HEADERS[k] = v``
+    and bypassing the per-instance copy in ``SessionManager.__init__``.
+    """
+    from pyrh.models.sessionmanager import HEADERS
+
+    with pytest.raises(TypeError):
+        HEADERS["X-Leaked-Key"] = "evil"
+
+
 def test_repr_short_form(sm):
     assert repr(sm) == "SessionManager<user@example.com>"
 

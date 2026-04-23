@@ -9,7 +9,8 @@ import subprocess
 import uuid
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple, Union, cast
+from types import MappingProxyType
+from typing import Any, Dict, Mapping, Optional, TYPE_CHECKING, Tuple, Union, cast
 from urllib.request import getproxies
 
 import certifi
@@ -41,8 +42,15 @@ else:
     CaseInsensitiveDictType = CaseInsensitiveDict
 Proxies = Dict[str, str]
 
-HEADERS: CaseInsensitiveDictType = CaseInsensitiveDict(robinhood_headers)
-"""Headers used when performing requests with robinhood api."""
+# ``HEADERS`` is exposed as a read-only ``MappingProxyType`` so that
+# accidental direct mutation (``HEADERS["X"] = "y"``) raises ``TypeError``
+# instead of silently leaking into every future ``SessionManager`` instance.
+# The per-instance copy still happens in ``SessionManager.__init__`` via
+# ``CaseInsensitiveDict(HEADERS)``; ``CaseInsensitiveDict`` accepts any
+# mapping at construction time, so the read-only view is a drop-in substitute
+# for the previous mutable ``CaseInsensitiveDict`` at the module level.
+HEADERS: Mapping[str, str] = MappingProxyType(dict(robinhood_headers))
+"""Read-only default headers used when performing requests with the Robinhood API."""
 
 
 def _truncate_body(res: Any, limit: int = 200) -> str:
