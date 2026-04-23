@@ -1608,8 +1608,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface the symbol + side + quantity so operators
+            # can identify which order-submission call failed.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                },
             )
         return res
 
@@ -1794,8 +1802,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface symbol + side + quantity so operators can
+            # identify which order-submission failed.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                },
             )
         return res
 
@@ -1858,8 +1874,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface symbol + quantity + side so place_order
+            # failures map back to the caller input.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": instrument.get("symbol"),
+                    "quantity": quantity,
+                    "side": transaction.name.lower(),
+                },
             )
         return res
 
@@ -1968,8 +1992,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 # via ``_raise_for_http_error`` so callers can distinguish
                 # 5xx / 429 / 4xx by exception class. Breaks the legacy
                 # ``ValueError`` contract — see PR #148 release note.
+                # Issue #150: thread order_id into the message to preserve
+                # the debuggability of the pre-#148 ``ValueError`` format
+                # (``Failed for order_id: ...``).
                 _raise_for_http_error(
-                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                    err_msg,
+                    fallback_exc=RobinhoodOrderSubmissionError,
+                    context={"order_id": order_id},
                 )
 
             if order.get("cancel") is not None:
@@ -1989,9 +2018,12 @@ class Robinhood(InstrumentManager, SessionManager):
                         # propagate as distinct pyrh exceptions. Reuses
                         # RobinhoodOrderSubmissionError from PR #13 (#148)
                         # as the 4xx fallback.
+                        # Issue #150: surface order_id so the retry-POST
+                        # failure is correlatable to the request.
                         _raise_for_http_error(
                             err_msg,
                             fallback_exc=RobinhoodOrderSubmissionError,
+                            context={"order_id": order_id},
                         )
 
         elif isinstance(order_id, dict):
@@ -2000,8 +2032,11 @@ class Robinhood(InstrumentManager, SessionManager):
                 order = self.get_url(urls.orders(order_id))
             except requests.exceptions.HTTPError as err_msg:
                 # Issue #148 (dict-branch twin of the str-branch site above).
+                # Issue #150: thread extracted order_id into the message.
                 _raise_for_http_error(
-                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                    err_msg,
+                    fallback_exc=RobinhoodOrderSubmissionError,
+                    context={"order_id": order_id},
                 )
 
             if order.get("cancel") is not None:
@@ -2017,9 +2052,11 @@ class Robinhood(InstrumentManager, SessionManager):
                     except requests.exceptions.HTTPError as err_msg:
                         # Issue #147: dict-branch twin of the str-branch
                         # POST dispatcher above. See rationale there.
+                        # Issue #150: surface order_id.
                         _raise_for_http_error(
                             err_msg,
                             fallback_exc=RobinhoodOrderSubmissionError,
+                            context={"order_id": order_id},
                         )
 
         elif not isinstance(order_id, str) or not isinstance(order_id, dict):
