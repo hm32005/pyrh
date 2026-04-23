@@ -216,3 +216,69 @@ def test_dispatcher_context_non_string_values_stringified():
     msg = str(exc_info.value)
     assert "quantity=42" in msg
     assert "price=1.5" in msg
+
+
+# ---------------------------------------------------------------------------
+# BC invariant: empty context preserves legacy ``exc.args == ()`` tuple
+# ---------------------------------------------------------------------------
+#
+# Round-2 guard (PR #16 review, Guard 1): the PR's BC invariant claims
+# "empty context → byte-identical legacy message." That holds for ``str(exc)``
+# but BREAKS on ``exc.args``:
+#
+#   Legacy pre-#150: ``InvalidTickerSymbol()`` → ``.args == ()``
+#   PR #150 v1:      ``InvalidTickerSymbol()`` → ``.args == ('',)``
+#                    (because ``__init__`` does ``super().__init__("")``)
+#
+# A defensive caller doing ``if not exc.args:`` would silently change behaviour.
+# We pin the tuple to ``()`` so the full BC invariant is honoured — the
+# exception is indistinguishable from a legacy construction, not just in
+# ``str()`` but in the full ``.args`` shape.
+
+
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        InvalidTickerSymbol,
+        InvalidOptionId,
+        RobinhoodResourceError,
+        RobinhoodOrderSubmissionError,
+    ],
+)
+def test_empty_context_preserves_legacy_empty_args_tuple(exc_cls):
+    """BC invariant: ``exc_cls()`` with no context has ``.args == ()`` (legacy)."""
+    exc = exc_cls()
+    assert exc.args == (), (
+        f"BC break on .args: {exc_cls.__name__}() has {exc.args!r}, expected ()"
+    )
+
+
+@pytest.mark.parametrize(
+    "exc_cls,expected_prefix",
+    [
+        (InvalidTickerSymbol, "Invalid or unknown ticker symbol"),
+        (InvalidOptionId, "Invalid or unknown option id"),
+        (RobinhoodResourceError, "Robinhood resource error"),
+        (RobinhoodOrderSubmissionError, "Order submission or cancellation failed"),
+    ],
+)
+def test_non_empty_context_populates_args_tuple(exc_cls, expected_prefix):
+    """Regression guard: non-empty context populates ``.args`` with the full message."""
+    exc = exc_cls("ticker=AAPL")
+    assert len(exc.args) == 1, f"{exc_cls.__name__}: expected 1-tuple, got {exc.args!r}"
+    assert expected_prefix in exc.args[0]
+    assert "ticker=AAPL" in exc.args[0]
+
+
+def test_empty_context_preserves_legacy_empty_str():
+    """Sanity check: ``str(exc_cls())`` remains empty (legacy pre-#150 behaviour)."""
+    # Pre-#150: ``str(InvalidTickerSymbol())`` returns '' because
+    # ``str(Exception())`` is '' (Python default). The round-2 fix keeps this
+    # while also fixing ``.args``.
+    for cls in (
+        InvalidTickerSymbol,
+        InvalidOptionId,
+        RobinhoodResourceError,
+        RobinhoodOrderSubmissionError,
+    ):
+        assert str(cls()) == "", f"{cls.__name__}() str changed: {str(cls())!r}"

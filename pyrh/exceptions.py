@@ -54,15 +54,21 @@ class InvalidTickerSymbol(PyrhException):
     Issue #150: accepts an optional positional ``context_str`` so the
     dispatcher can surface the ticker (or other resource id) that triggered
     the 4xx in the exception message. When no context is passed the argument
-    list is empty — identical to the pre-#150 constructor signature.
+    list is empty — identical to the pre-#150 constructor signature
+    (``.args == ()`` and ``str(exc) == ""``).
     """
 
     def __init__(self, context_str: str = "") -> None:
-        super().__init__(
-            _with_context("Invalid or unknown ticker symbol", context_str)
-            if context_str
-            else ""
-        )
+        if context_str:
+            super().__init__(
+                _with_context("Invalid or unknown ticker symbol", context_str)
+            )
+        else:
+            # Legacy BC: ``InvalidTickerSymbol()`` must have ``.args == ()`` —
+            # matching the pre-#150 construction ``raise InvalidTickerSymbol``.
+            # Passing ``""`` to ``super().__init__`` would set ``.args == ('',)``
+            # and break defensive callers doing ``if not exc.args:``.
+            super().__init__()
 
 
 class InvalidOptionId(PyrhException):
@@ -73,11 +79,12 @@ class InvalidOptionId(PyrhException):
     """
 
     def __init__(self, context_str: str = "") -> None:
-        super().__init__(
-            _with_context("Invalid or unknown option id", context_str)
-            if context_str
-            else ""
-        )
+        if context_str:
+            super().__init__(
+                _with_context("Invalid or unknown option id", context_str)
+            )
+        else:
+            super().__init__()
 
 
 class RobinhoodServerError(PyrhException):
@@ -127,15 +134,16 @@ class RobinhoodResourceError(PyrhException):
     (quotes/fundamentals) and ``InvalidOptionId`` (options).
 
     Issue #150: accepts an optional positional ``context_str``. Legacy
-    no-arg calls remain BC.
+    no-arg calls remain BC (``.args == ()`` and ``str(exc) == ""``).
     """
 
     def __init__(self, context_str: str = "") -> None:
-        super().__init__(
-            _with_context("Robinhood resource error", context_str)
-            if context_str
-            else ""
-        )
+        if context_str:
+            super().__init__(
+                _with_context("Robinhood resource error", context_str)
+            )
+        else:
+            super().__init__()
 
 
 class RobinhoodOrderSubmissionError(PyrhException):
@@ -166,17 +174,18 @@ class RobinhoodOrderSubmissionError(PyrhException):
     and ``place_order``.
 
     Issue #150: accepts an optional positional ``context_str``. Legacy
-    no-arg calls remain BC.
+    no-arg calls remain BC (``.args == ()`` and ``str(exc) == ""``).
     """
 
     def __init__(self, context_str: str = "") -> None:
-        super().__init__(
-            _with_context(
-                "Order submission or cancellation failed", context_str
+        if context_str:
+            super().__init__(
+                _with_context(
+                    "Order submission or cancellation failed", context_str
+                )
             )
-            if context_str
-            else ""
-        )
+        else:
+            super().__init__()
 
 
 class RobinhoodRateLimitError(PyrhException):
