@@ -2,7 +2,7 @@
 """robinhood.py: a collection of utilities for working with Robinhood's Private API."""
 
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import unquote
 
 import pendulum
@@ -44,10 +44,30 @@ class Transaction(Enum):
     SELL = "sell"
 
 
+def _format_context(context: Mapping[str, Any] | None) -> str:
+    """Render a context mapping as ``"k1=v1, k2=v2"`` for exception messages.
+
+    Issue #150: the dispatcher ``_raise_for_http_error`` now accepts an
+    optional ``context`` mapping so each call site can surface the resource
+    id (order id, ticker, instrument url, tag, option id, etc.) that
+    triggered the HTTP error. This helper produces the string form; an
+    empty or ``None`` mapping returns ``""`` so the BC branch in each
+    exception class treats it as "no context" and leaves the legacy
+    message unchanged.
+
+    Values are rendered with ``str()``; non-string context values (ints,
+    floats, yarl URLs) stringify naturally without exploding.
+    """
+    if not context:
+        return ""
+    return ", ".join(f"{key}={value}" for key, value in context.items())
+
+
 def _raise_for_http_error(
     err: requests.exceptions.HTTPError,
     *,
     fallback_exc: type = InvalidTickerSymbol,
+    context: Mapping[str, Any] | None = None,
 ) -> None:
     """Translate a ``requests.HTTPError`` from a quote/fundamentals/options call
     into the right pyrh exception based on status code.
@@ -72,16 +92,27 @@ def _raise_for_http_error(
             passes ``InvalidOptionId``. This preserves the legacy "bad input"
             signal per-endpoint while letting 5xx / 429 propagate as
             server/rate-limit errors.
+        context: optional mapping of resource-id fields (e.g.
+            ``{"order_id": order_id}``, ``{"ticker": symbol}``,
+            ``{"instrument_url": url}``) that gets rendered into the raised
+            exception's message for debuggability. Issue #150: closes the
+            regression where the dispatcher lost the resource context that
+            the legacy ``raise ValueError("Failed for order_id: " + ...)``
+            pattern used to carry. When ``None`` / empty the exception
+            message is byte-identical to pre-#150 pyrh releases
+            (backwards-compatibility invariant).
 
     Always re-raises — never returns — and uses ``from None`` so the HTTP
     stack trace does not leak to callers (matches the pattern shipped for
     ``_try_refresh`` in the auth refactor).
     """
+    context_str = _format_context(context)
+
     response = getattr(err, "response", None)
     status_code = getattr(response, "status_code", None) if response is not None else None
 
     if status_code is not None and 500 <= status_code < 600:
-        raise RobinhoodServerError(status_code) from None
+        raise RobinhoodServerError(status_code, context_str) from None
     if status_code == 429:
         retry_after_raw = (
             response.headers.get("Retry-After") if response is not None else None
@@ -90,8 +121,10 @@ def _raise_for_http_error(
             retry_after = int(retry_after_raw) if retry_after_raw is not None else None
         except (TypeError, ValueError):
             retry_after = None
-        raise RobinhoodRateLimitError(retry_after=retry_after) from None
-    raise fallback_exc() from None
+        raise RobinhoodRateLimitError(
+            retry_after=retry_after, context_str=context_str
+        ) from None
+    raise fallback_exc(context_str) from None
 
 
 # Backwards-compatible alias. Keeps any external caller (test helpers, fixtures,
@@ -124,7 +157,13 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.USER)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: mark the resource for greppable log lines; no
+            # per-call input to surface (session-scoped endpoint).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "user"},
+            )
 
     def investment_profile(self):
         """Fetch investment_profile."""
@@ -134,7 +173,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.INVESTMENT_PROFILE)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "investment_profile"},
+            )
 
     def quote_data(self, stock=""):
         """Fetch stock quote.
@@ -148,9 +192,11 @@ class Robinhood(InstrumentManager, SessionManager):
         """
 
         if isinstance(stock, dict) and "symbol" in stock.keys():
-            url = str(urls.QUOTES) + stock["symbol"] + "/"
+            ticker = stock["symbol"]
+            url = str(urls.QUOTES) + ticker + "/"
         elif isinstance(stock, str):
-            url = str(urls.QUOTES) + stock + "/"
+            ticker = stock
+            url = str(urls.QUOTES) + ticker + "/"
         else:
             raise InvalidTickerSymbol()
 
@@ -158,7 +204,9 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: thread the ticker into the raised exception so
+            # operators can correlate the failure with the input.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
         return data
 
@@ -181,7 +229,9 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the full ticker list so callers can
+            # identify which batch triggered the failure.
+            _raise_for_http_error(e, context={"tickers": ",".join(stocks)})
 
         return data["results"]
 
@@ -235,7 +285,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             info = self.get_url(urls.market_data_quotes(instruments))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the instruments payload (first few items,
+            # truncated) so operators can identify which batch blew up.
+            _raise_for_http_error(
+                e,
+                context={"instrument_count": len(instruments)},
+            )
         return info["results"]
 
     def get_historical_quotes(self, stock, interval, span, bounds=Bounds.REGULAR):
@@ -278,7 +333,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(historicals)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker / interval / span tuple so
+            # operators can reproduce the failing historicals query.
+            _raise_for_http_error(
+                e,
+                context={
+                    "tickers": ",".join(stock),
+                    "interval": interval,
+                    "span": span,
+                },
+            )
 
     def get_news(self, stock):
         """Fetch news endpoint.
@@ -296,10 +360,12 @@ class Robinhood(InstrumentManager, SessionManager):
         # input (fallback: ``InvalidTickerSymbol``); 5xx / 429 surface as
         # ``RobinhoodServerError`` / ``RobinhoodRateLimitError`` instead of
         # leaking raw ``requests.HTTPError``.
+        ticker = stock.upper()
         try:
-            return self.get_url(urls.news(stock.upper()))
+            return self.get_url(urls.news(ticker))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker for debuggability.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
     def get_watchlists(self):
         """Fetch watchlists endpoint and queries for
@@ -331,7 +397,14 @@ class Robinhood(InstrumentManager, SessionManager):
                     res.append(self.get_url(rec["instrument"]))
             return res
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: no meaningful per-call input (the watchlists
+            # endpoint is scoped by the authenticated session), but mark
+            # the resource so log lines are greppable.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "watchlists"},
+            )
 
     # Back-compat alias for callers that used the short name introduced in
     # the buggy @property revision. Kept as a regular unbound method so it
@@ -567,7 +640,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.get_url(urls.ACCOUNTS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "accounts"},
+            )
 
         return res["results"][0]
 
@@ -600,7 +678,9 @@ class Robinhood(InstrumentManager, SessionManager):
                 "num_open_positions"
             ]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker so logs can pinpoint the
+            # failing popularity lookup.
+            _raise_for_http_error(e, context={"ticker": stock})
 
     def get_tickers_by_tag(self, tag=None):
         """Get a list of instruments belonging to a tag
@@ -636,7 +716,13 @@ class Robinhood(InstrumentManager, SessionManager):
             instrument_list = self.get_url(urls.tags(tag))["instruments"]
             return [self.get_url(instrument)["symbol"] for instrument in instrument_list]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: surface the tag so operators can identify which
+            # lookup failed.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"tag": tag},
+            )
 
     def all_instruments(self):
         """
@@ -663,7 +749,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 instruments.append(self.get_url(position["instrument"]))
             return instruments
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: mark the resource for grep-ability; there's no
+            # per-call input (session-scoped endpoint).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "all_instruments"},
+            )
 
     def get_symbol_from_instrument_url(self, url):
         # Surfaced by the surface-scan AST guard (issue #144). Takes an
@@ -674,7 +766,13 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             instrument = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: surface the instrument URL so operators can see
+            # which resource failed to resolve.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"instrument_url": url},
+            )
         return instrument["symbol"]
 
     ###########################################################################
@@ -714,7 +812,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 )["results"]
             ]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: surface stock + option_type + expiration filter so
+            # operators can reproduce the failing options-chain lookup.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"stock": stock, "option_type": option_type},
+            )
 
     def get_option_market_data(self, option_id):
         """Gets a list of market data for a given option_id.
@@ -733,7 +837,12 @@ class Robinhood(InstrumentManager, SessionManager):
             # dispatcher now routes 5xx -> RobinhoodServerError and 429 ->
             # RobinhoodRateLimitError while preserving the legacy
             # InvalidOptionId mapping for the 4xx-not-429 branch.
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread option_id into the message.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"option_id": option_id},
+            )
 
     def options_owned(self):
         # Issue #135: translate 5xx/429 on the options-positions endpoint to
@@ -746,7 +855,13 @@ class Robinhood(InstrumentManager, SessionManager):
             options = options["results"]
             return options
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: no per-call input (session-scoped); mark the
+            # resource so logs remain greppable.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"resource": "options_owned"},
+            )
 
     def get_option_marketdata(self, option_id):
         # Issue #135: sibling of ``get_option_market_data`` (fixed in #125).
@@ -757,7 +872,12 @@ class Robinhood(InstrumentManager, SessionManager):
             )
             return info
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread option_id into the message.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"option_id": option_id},
+            )
 
     def get_option_chain_id(self, symbol):
         # Issue #135: two ``get_url`` calls — instrument lookup and chain
@@ -777,7 +897,13 @@ class Robinhood(InstrumentManager, SessionManager):
 
             return chain_id
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread the symbol so operators can identify the
+            # failing chain lookup.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"symbol": symbol},
+            )
 
     def get_option_quote(self, symbol, strike, expiry, otype, state="active"):
         url = urls.OPTIONS_BASE.join(URL("instruments/"))
@@ -796,7 +922,18 @@ class Robinhood(InstrumentManager, SessionManager):
             # symbol, strike, expiry, otype should uniquely define an option
             results = self.get_url(url.with_query(**params)).get("results")
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: surface the 4-tuple that uniquely identifies the
+            # failing option.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={
+                    "symbol": symbol,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "otype": otype,
+                },
+            )
         if not results:
             return
         else:
@@ -830,14 +967,17 @@ class Robinhood(InstrumentManager, SessionManager):
         if not stock:  # pragma: no cover
             stock = input("Symbol: ")
 
-        url = str(urls.fundamentals(str(stock.upper())))
+        ticker = str(stock.upper())
+        url = str(urls.fundamentals(ticker))
 
         # Check for validity of symbol
         try:
             data = self.get_url(url)
             return data
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: thread the ticker so fundamentals failures are
+            # tied back to the input symbol.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
     ###########################################################################
     #                           PORTFOLIOS DATA
@@ -850,7 +990,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.PORTFOLIOS, schema=PortfolioSchema())
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "portfolio"},
+            )
 
     def order_history(self, order_id=None):
         """Wrapper for portfolios
@@ -866,7 +1011,18 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.orders(order_id))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: thread order_id when caller provided one, else
+            # fall back to the resource marker.
+            ctx = (
+                {"order_id": order_id}
+                if order_id is not None
+                else {"resource": "order_history"}
+            )
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context=ctx,
+            )
 
     def dividends(self):
         """Wrapper for portfolios
@@ -880,7 +1036,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.DIVIDENDS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "dividends"},
+            )
 
     ###########################################################################
     #                           POSITIONS DATA
@@ -898,7 +1059,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.POSITIONS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "positions"},
+            )
 
     def securities_owned(self):
         """Returns list of securities' symbols that the user has shares in
@@ -912,7 +1078,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(str(urls.POSITIONS) + "?nonzero=true")
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "securities_owned"},
+            )
 
     ###########################################################################
     #                               PLACE ORDER
@@ -1437,8 +1608,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface the symbol + side + quantity so operators
+            # can identify which order-submission call failed.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                },
             )
         return res
 
@@ -1623,8 +1802,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface symbol + side + quantity so operators can
+            # identify which order-submission failed.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": quantity,
+                },
             )
         return res
 
@@ -1687,8 +1874,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.post(urls.orders(), data=payload)
         except requests.exceptions.HTTPError as err_msg:
+            # Issue #150: surface symbol + quantity + side so place_order
+            # failures map back to the caller input.
             _raise_for_http_error(
-                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                err_msg,
+                fallback_exc=RobinhoodOrderSubmissionError,
+                context={
+                    "symbol": instrument.get("symbol"),
+                    "quantity": quantity,
+                    "side": transaction.name.lower(),
+                },
             )
         return res
 
@@ -1797,8 +1992,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 # via ``_raise_for_http_error`` so callers can distinguish
                 # 5xx / 429 / 4xx by exception class. Breaks the legacy
                 # ``ValueError`` contract — see PR #148 release note.
+                # Issue #150: thread order_id into the message to preserve
+                # the debuggability of the pre-#148 ``ValueError`` format
+                # (``Failed for order_id: ...``).
                 _raise_for_http_error(
-                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                    err_msg,
+                    fallback_exc=RobinhoodOrderSubmissionError,
+                    context={"order_id": order_id},
                 )
 
             if order.get("cancel") is not None:
@@ -1818,9 +2018,12 @@ class Robinhood(InstrumentManager, SessionManager):
                         # propagate as distinct pyrh exceptions. Reuses
                         # RobinhoodOrderSubmissionError from PR #13 (#148)
                         # as the 4xx fallback.
+                        # Issue #150: surface order_id so the retry-POST
+                        # failure is correlatable to the request.
                         _raise_for_http_error(
                             err_msg,
                             fallback_exc=RobinhoodOrderSubmissionError,
+                            context={"order_id": order_id},
                         )
 
         elif isinstance(order_id, dict):
@@ -1829,8 +2032,11 @@ class Robinhood(InstrumentManager, SessionManager):
                 order = self.get_url(urls.orders(order_id))
             except requests.exceptions.HTTPError as err_msg:
                 # Issue #148 (dict-branch twin of the str-branch site above).
+                # Issue #150: thread extracted order_id into the message.
                 _raise_for_http_error(
-                    err_msg, fallback_exc=RobinhoodOrderSubmissionError
+                    err_msg,
+                    fallback_exc=RobinhoodOrderSubmissionError,
+                    context={"order_id": order_id},
                 )
 
             if order.get("cancel") is not None:
@@ -1846,9 +2052,11 @@ class Robinhood(InstrumentManager, SessionManager):
                     except requests.exceptions.HTTPError as err_msg:
                         # Issue #147: dict-branch twin of the str-branch
                         # POST dispatcher above. See rationale there.
+                        # Issue #150: surface order_id.
                         _raise_for_http_error(
                             err_msg,
                             fallback_exc=RobinhoodOrderSubmissionError,
+                            context={"order_id": order_id},
                         )
 
         elif not isinstance(order_id, str) or not isinstance(order_id, dict):
