@@ -594,18 +594,28 @@ class Robinhood(InstrumentManager, SessionManager):
             underlying equity instrument
 
         """
-        instrument_id = self.get_url(self.quote_data(stock)["instrument"])["id"]
-        if isinstance(expiration_dates, list):
-            _expiration_dates_string = ",".join(expiration_dates)
-        else:
-            _expiration_dates_string = expiration_dates
-        chain_id = self.get_url(urls.chain(instrument_id))["results"][0]["id"]
-        return [
-            contract
-            for contract in self.get_url(
-                urls.options(chain_id, _expiration_dates_string, option_type)
-            )["results"]
-        ]
+        # Issue #135: wrap the unwrapped ``get_url`` calls (instrument lookup,
+        # options-chain discovery, options-list retrieval) in the same
+        # dispatcher used by ``get_option_market_data`` (see PR #8 for #125).
+        # The first ``get_url`` hop is via ``quote_data`` which already has
+        # its own dispatcher, but the three subsequent calls are on the
+        # options code path and previously raised raw ``requests.HTTPError``
+        # on any 5xx / 429 / non-404 4xx.
+        try:
+            instrument_id = self.get_url(self.quote_data(stock)["instrument"])["id"]
+            if isinstance(expiration_dates, list):
+                _expiration_dates_string = ",".join(expiration_dates)
+            else:
+                _expiration_dates_string = expiration_dates
+            chain_id = self.get_url(urls.chain(instrument_id))["results"][0]["id"]
+            return [
+                contract
+                for contract in self.get_url(
+                    urls.options(chain_id, _expiration_dates_string, option_type)
+                )["results"]
+            ]
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def get_option_market_data(self, option_id):
         """Gets a list of market data for a given option_id.
@@ -627,27 +637,48 @@ class Robinhood(InstrumentManager, SessionManager):
             _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def options_owned(self):
-        options = self.get_url(urls.OPTIONS_BASE.join(URL("positions/?nonzero=true")))
-        options = options["results"]
-        return options
+        # Issue #135: translate 5xx/429 on the options-positions endpoint to
+        # the informative ``RobinhoodServerError`` / ``RobinhoodRateLimitError``
+        # rather than leaking raw ``requests.HTTPError`` to consumers.
+        try:
+            options = self.get_url(
+                urls.OPTIONS_BASE.join(URL("positions/?nonzero=true"))
+            )
+            options = options["results"]
+            return options
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def get_option_marketdata(self, option_id):
-        info = self.get_url(urls.MARKET_DATA_BASE.join(URL(f"options/{option_id}/")))
-        return info
+        # Issue #135: sibling of ``get_option_market_data`` (fixed in #125).
+        # Same dispatcher, same fallback.
+        try:
+            info = self.get_url(
+                urls.MARKET_DATA_BASE.join(URL(f"options/{option_id}/"))
+            )
+            return info
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def get_option_chain_id(self, symbol):
-        stock_info = self.get_url(urls.INSTRUMENTS_BASE.with_query(symbol=symbol))
-        instrument_id = stock_info["results"][0]["id"]
-        url = urls.OPTIONS_BASE.join(URL("chains/"))
-        chains = self.get_url(url.with_query(equity_instrument_ids=instrument_id))
-        chains = chains["results"]
-        chain_id = None
+        # Issue #135: two ``get_url`` calls — instrument lookup and chain
+        # discovery. Either can hit a Robinhood outage; both need dispatcher
+        # translation.
+        try:
+            stock_info = self.get_url(urls.INSTRUMENTS_BASE.with_query(symbol=symbol))
+            instrument_id = stock_info["results"][0]["id"]
+            url = urls.OPTIONS_BASE.join(URL("chains/"))
+            chains = self.get_url(url.with_query(equity_instrument_ids=instrument_id))
+            chains = chains["results"]
+            chain_id = None
 
-        for chain in chains:
-            if chain["can_open_position"]:
-                chain_id = chain["id"]
+            for chain in chains:
+                if chain["can_open_position"]:
+                    chain_id = chain["id"]
 
-        return chain_id
+            return chain_id
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def get_option_quote(self, symbol, strike, expiry, otype, state="active"):
         url = urls.OPTIONS_BASE.join(URL("instruments/"))
@@ -658,8 +689,15 @@ class Robinhood(InstrumentManager, SessionManager):
             "type":             otype,
             "state":            state,
         }
-        # symbol, strike, expiry, otype should uniquely define an option
-        results = self.get_url(url.with_query(**params)).get("results")
+        # Issue #135: the options-instruments ``get_url`` call was unwrapped.
+        # The downstream ``get_option_marketdata`` already has its own
+        # dispatcher (also fixed in this change), so we only need to wrap
+        # the first call here.
+        try:
+            # symbol, strike, expiry, otype should uniquely define an option
+            results = self.get_url(url.with_query(**params)).get("results")
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
         if not results:
             return
         else:
