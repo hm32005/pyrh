@@ -157,7 +157,13 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.USER)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: mark the resource for greppable log lines; no
+            # per-call input to surface (session-scoped endpoint).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "user"},
+            )
 
     def investment_profile(self):
         """Fetch investment_profile."""
@@ -167,7 +173,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.INVESTMENT_PROFILE)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "investment_profile"},
+            )
 
     def quote_data(self, stock=""):
         """Fetch stock quote.
@@ -629,7 +640,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             res = self.get_url(urls.ACCOUNTS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "accounts"},
+            )
 
         return res["results"][0]
 
@@ -974,7 +990,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.PORTFOLIOS, schema=PortfolioSchema())
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "portfolio"},
+            )
 
     def order_history(self, order_id=None):
         """Wrapper for portfolios
@@ -990,7 +1011,18 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.orders(order_id))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: thread order_id when caller provided one, else
+            # fall back to the resource marker.
+            ctx = (
+                {"order_id": order_id}
+                if order_id is not None
+                else {"resource": "order_history"}
+            )
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context=ctx,
+            )
 
     def dividends(self):
         """Wrapper for portfolios
@@ -1004,7 +1036,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.DIVIDENDS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "dividends"},
+            )
 
     ###########################################################################
     #                           POSITIONS DATA
@@ -1022,7 +1059,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(urls.POSITIONS)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "positions"},
+            )
 
     def securities_owned(self):
         """Returns list of securities' symbols that the user has shares in
@@ -1036,7 +1078,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(str(urls.POSITIONS) + "?nonzero=true")
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: resource marker (session-scoped).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "securities_owned"},
+            )
 
     ###########################################################################
     #                               PLACE ORDER
