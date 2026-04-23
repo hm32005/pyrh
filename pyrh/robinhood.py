@@ -181,9 +181,11 @@ class Robinhood(InstrumentManager, SessionManager):
         """
 
         if isinstance(stock, dict) and "symbol" in stock.keys():
-            url = str(urls.QUOTES) + stock["symbol"] + "/"
+            ticker = stock["symbol"]
+            url = str(urls.QUOTES) + ticker + "/"
         elif isinstance(stock, str):
-            url = str(urls.QUOTES) + stock + "/"
+            ticker = stock
+            url = str(urls.QUOTES) + ticker + "/"
         else:
             raise InvalidTickerSymbol()
 
@@ -191,7 +193,9 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: thread the ticker into the raised exception so
+            # operators can correlate the failure with the input.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
         return data
 
@@ -214,7 +218,9 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the full ticker list so callers can
+            # identify which batch triggered the failure.
+            _raise_for_http_error(e, context={"tickers": ",".join(stocks)})
 
         return data["results"]
 
@@ -268,7 +274,12 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             info = self.get_url(urls.market_data_quotes(instruments))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the instruments payload (first few items,
+            # truncated) so operators can identify which batch blew up.
+            _raise_for_http_error(
+                e,
+                context={"instrument_count": len(instruments)},
+            )
         return info["results"]
 
     def get_historical_quotes(self, stock, interval, span, bounds=Bounds.REGULAR):
@@ -311,7 +322,16 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             return self.get_url(historicals)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker / interval / span tuple so
+            # operators can reproduce the failing historicals query.
+            _raise_for_http_error(
+                e,
+                context={
+                    "tickers": ",".join(stock),
+                    "interval": interval,
+                    "span": span,
+                },
+            )
 
     def get_news(self, stock):
         """Fetch news endpoint.
@@ -329,10 +349,12 @@ class Robinhood(InstrumentManager, SessionManager):
         # input (fallback: ``InvalidTickerSymbol``); 5xx / 429 surface as
         # ``RobinhoodServerError`` / ``RobinhoodRateLimitError`` instead of
         # leaking raw ``requests.HTTPError``.
+        ticker = stock.upper()
         try:
-            return self.get_url(urls.news(stock.upper()))
+            return self.get_url(urls.news(ticker))
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker for debuggability.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
     def get_watchlists(self):
         """Fetch watchlists endpoint and queries for
@@ -364,7 +386,14 @@ class Robinhood(InstrumentManager, SessionManager):
                     res.append(self.get_url(rec["instrument"]))
             return res
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: no meaningful per-call input (the watchlists
+            # endpoint is scoped by the authenticated session), but mark
+            # the resource so log lines are greppable.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "watchlists"},
+            )
 
     # Back-compat alias for callers that used the short name introduced in
     # the buggy @property revision. Kept as a regular unbound method so it
@@ -633,7 +662,9 @@ class Robinhood(InstrumentManager, SessionManager):
                 "num_open_positions"
             ]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: surface the ticker so logs can pinpoint the
+            # failing popularity lookup.
+            _raise_for_http_error(e, context={"ticker": stock})
 
     def get_tickers_by_tag(self, tag=None):
         """Get a list of instruments belonging to a tag
@@ -669,7 +700,13 @@ class Robinhood(InstrumentManager, SessionManager):
             instrument_list = self.get_url(urls.tags(tag))["instruments"]
             return [self.get_url(instrument)["symbol"] for instrument in instrument_list]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: surface the tag so operators can identify which
+            # lookup failed.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"tag": tag},
+            )
 
     def all_instruments(self):
         """
@@ -696,7 +733,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 instruments.append(self.get_url(position["instrument"]))
             return instruments
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: mark the resource for grep-ability; there's no
+            # per-call input (session-scoped endpoint).
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "all_instruments"},
+            )
 
     def get_symbol_from_instrument_url(self, url):
         # Surfaced by the surface-scan AST guard (issue #144). Takes an
@@ -707,7 +750,13 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             instrument = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            # Issue #150: surface the instrument URL so operators can see
+            # which resource failed to resolve.
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"instrument_url": url},
+            )
         return instrument["symbol"]
 
     ###########################################################################
@@ -863,14 +912,17 @@ class Robinhood(InstrumentManager, SessionManager):
         if not stock:  # pragma: no cover
             stock = input("Symbol: ")
 
-        url = str(urls.fundamentals(str(stock.upper())))
+        ticker = str(stock.upper())
+        url = str(urls.fundamentals(ticker))
 
         # Check for validity of symbol
         try:
             data = self.get_url(url)
             return data
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e)
+            # Issue #150: thread the ticker so fundamentals failures are
+            # tied back to the input symbol.
+            _raise_for_http_error(e, context={"ticker": ticker})
 
     ###########################################################################
     #                           PORTFOLIOS DATA
