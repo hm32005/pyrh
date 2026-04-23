@@ -9,8 +9,15 @@ the loose ``_inside_try`` (any ast.Try ancestor) with
 ``_inside_try_with_dispatcher`` (nearest enclosing Try's handlers must
 invoke ``_raise_for_http_error``). While merging that work, review found
 that PR #14 (#147) had introduced a twin surface-scan guard for POST
-paths with the SAME loose-try weakness. This module extracts the tight
+paths with the SAME loose-try weakness. This module extracted the tight
 helpers so BOTH guards share one implementation.
+
+Issues #141 / #158 extended the consolidation to the remaining three
+method-list guards (Phase A, Phase B, options). Those each carried their
+own ``_has_dispatcher`` returning True on ANY ``ast.Try`` anywhere in
+the method body — worse than the loose ``_inside_try`` that #144 fixed
+(it did not even require the call to be inside the try). They now all
+route through ``_inside_try_with_dispatcher`` + ``_is_self_get_url_call``.
 
 Design
 ------
@@ -22,19 +29,32 @@ call sites read cleanly.
 
 Scope
 -----
-Used by:
+Used by 5 guards (consolidation complete as of #141 / #158):
 
 * ``tests/test_robinhood_phase_c_and_142_http_error_mapping.py`` —
-  ``test_no_unwrapped_get_url_call_sites_on_robinhood_class`` (#142/#144).
+  ``test_no_unwrapped_get_url_call_sites_on_robinhood_class`` (#142 / #144,
+  surface-scan over every ``Robinhood`` method with an exemption
+  allowlist).
 * ``tests/test_robinhood_post_path_order_submission_http_error_mapping.py`` —
-  ``test_no_unwrapped_self_post_call_sites_on_robinhood_class`` (#147, tightened here).
+  ``test_no_unwrapped_self_post_call_sites_on_robinhood_class`` (#147,
+  POST-path twin; tightened via this module in #144).
+* ``tests/test_robinhood_trading_portfolio_http_error_mapping.py`` —
+  ``test_all_phase_a_methods_have_http_error_handling`` (#137 Phase A;
+  tightened here in #141 / #158).
+* ``tests/test_robinhood_discovery_http_error_mapping.py`` —
+  ``test_all_phase_b_methods_have_http_error_handling`` (#137 Phase B;
+  tightened here in #141 / #158).
+* ``tests/test_robinhood_options_methods_http_error_mapping.py`` —
+  ``test_all_options_methods_have_http_error_handling`` (#135; tightened
+  here in #141 / #158).
 
-NOT consolidated (out-of-scope for this PR):
+Known limitations (out-of-scope, tracked separately):
 
-* Phase A / Phase B / discovery / options method-list guards use a far
-  looser ``_has_dispatcher`` that returns True for ANY ``ast.Try`` in the
-  method regardless of call containment. That weakness is tracked in a
-  follow-up issue and is scoped to the #141 consolidation work.
+* ``_inside_try_with_dispatcher`` uses ``ast.walk(handler)`` to find
+  ``_raise_for_http_error`` — a nested try whose handler swallows the
+  call and raises unrelated would still pass if an OUTER handler
+  contains a ``_raise_for_http_error`` call. This is a narrow blind
+  spot acknowledged in #144 and deferred.
 """
 from __future__ import annotations
 

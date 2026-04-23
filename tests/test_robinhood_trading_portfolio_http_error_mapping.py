@@ -269,41 +269,55 @@ PHASE_A_METHOD_NAMES = frozenset(
 )
 
 
-def test_all_phase_a_methods_have_http_error_handling():
-    """AST-level guard: every Phase-A method must have dispatcher wiring.
+# ---------------------------------------------------------------------------
+# Tight AST guard implementation (#141 / #158).
+#
+# Previous pattern (RED — kept in git history for reference):
+#
+#     def _has_dispatcher(node):
+#         for n in ast.walk(node):
+#             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+#                 if n.func.id == "_raise_for_http_error":
+#                     return True
+#             if isinstance(n, ast.Try):
+#                 return True  # <-- ANY try anywhere passes!
+#         return False
+#
+# Weakness: a method like ``get_popularity`` doing
+#
+#     def get_popularity(self, stock):
+#         try:
+#             json.loads(stock)
+#         except json.JSONDecodeError:
+#             pass
+#         return self.get_url(urls.build_popularity(stock))  # UNWRAPPED!
+#
+# passes silently under the loose guard. #158 flagged this.
+#
+# Tight pattern (#141 consolidation): reuse the shared helpers from
+# ``tests/_ast_guard_helpers.py`` (introduced by #144 / PR #15). For each
+# ``self.get_url(...)`` call in the method, verify it is inside a
+# ``try`` body whose except handler invokes ``_raise_for_http_error``.
+# ---------------------------------------------------------------------------
 
-    Scope: the 6 trading-path + portfolio methods tracked by issue #137
-    Phase A. A method is considered "wired" if its body contains either a
-    ``try`` block OR a call to ``_raise_for_http_error``.
+
+from tests._ast_guard_helpers import (  # noqa: E402
+    _inside_try_with_dispatcher,
+    _is_self_get_url_call,
+)
+
+
+def _collect_phase_a_offenders(source, method_names=PHASE_A_METHOD_NAMES):
+    """Return a list of ``(method_name, lineno)`` for every call site in
+    ``method_names`` whose ``self.get_url(...)`` is not protected by a
+    dispatching try/except.
+
+    Also returns a ``not_found`` set of method names that were expected on
+    the ``Robinhood`` class but not present — a renamed-method safety net.
     """
     import ast
-    from pathlib import Path
 
-    source = (
-        Path(__file__)
-        .resolve()
-        .parent.parent.joinpath("pyrh/robinhood.py")
-        .read_text()
-    )
     tree = ast.parse(source)
-
-    def _method_calls_http(node: ast.FunctionDef) -> bool:
-        http_call_names = {"get_url", "get", "post", "put", "delete", "patch"}
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-                if n.func.attr in http_call_names:
-                    return True
-        return False
-
-    def _has_dispatcher(node: ast.FunctionDef) -> bool:
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                if n.func.id == "_raise_for_http_error":
-                    return True
-            if isinstance(n, ast.Try):
-                return True
-        return False
-
     robinhood_class = next(
         (
             n
@@ -312,32 +326,181 @@ def test_all_phase_a_methods_have_http_error_handling():
         ),
         None,
     )
-    assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
+    if robinhood_class is None:
+        return [], set(method_names)
 
-    missing = []
+    offenders = []
     seen = set()
-    for node in ast.walk(robinhood_class):
-        if not isinstance(node, ast.FunctionDef):
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
             continue
-        if node.name not in PHASE_A_METHOD_NAMES:
+        if method.name not in method_names:
             continue
-        seen.add(node.name)
-        if not _method_calls_http(node):
-            # Phase A methods ALL hit get_url today. If this ever changes,
-            # it's suspicious — fail loudly so someone re-reads the method.
-            missing.append(f"{node.name} (no http call found — did the method change?)")
-            continue
-        if not _has_dispatcher(node):
-            missing.append(node.name)
+        seen.add(method.name)
+        for call in ast.walk(method):
+            if not _is_self_get_url_call(call):
+                continue
+            if _inside_try_with_dispatcher(method, call):
+                continue
+            offenders.append((method.name, call.lineno))
 
-    not_found = PHASE_A_METHOD_NAMES - seen
+    return offenders, method_names - seen
+
+
+def test_all_phase_a_methods_have_http_error_handling():
+    """AST-level guard: every Phase-A method must have its
+    ``self.get_url(...)`` call sites inside a ``try/except`` whose except
+    handler invokes ``_raise_for_http_error`` (tightened per #141 / #158).
+
+    Scope: the 6 trading-path + portfolio methods tracked by issue #137
+    Phase A. Prior implementation used a weaker ``_has_dispatcher`` that
+    returned True on any ``ast.Try`` anywhere in the method body — even a
+    try unrelated to the HTTP call. See module docstring above.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+
+    offenders, not_found = _collect_phase_a_offenders(source)
+
     assert not not_found, (
         f"Phase A methods not found on Robinhood class: {sorted(not_found)}. "
         "Has a method been renamed or removed? Update PHASE_A_METHOD_NAMES."
     )
-    assert not missing, (
-        "Phase A methods missing HTTPError dispatcher "
-        f"(see issue #137): {missing}. "
-        "Wrap the HTTP call in try/except requests.HTTPError and call "
-        "_raise_for_http_error(e, fallback_exc=RobinhoodResourceError)."
+    if offenders:
+        formatted = "\n".join(
+            f"  - {name} at line {lineno}" for name, lineno in offenders
+        )
+        pytest.fail(
+            "Phase A methods with unwrapped self.get_url(...) call sites "
+            f"(see issue #137): \n{formatted}\n\n"
+            "Wrap the HTTP call in try/except requests.HTTPError and call "
+            "_raise_for_http_error(e, fallback_exc=RobinhoodResourceError)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #141 / #158 — tight-guard boundary tests.
+#
+# These pin the TIGHT semantic by constructing synthetic method bodies
+# that the loose ``_has_dispatcher`` pattern would have accepted but
+# which the tightened consolidation MUST reject. They are the RED / GREEN
+# spec for the consolidation: they would have FAILED against the old
+# weaker implementation (any ast.Try passes), and PASS against the
+# tightened one routed through ``_inside_try_with_dispatcher``.
+# ---------------------------------------------------------------------------
+
+
+def _fabricate_robinhood_source_with(method_body):
+    """Build a minimal ``pyrh/robinhood.py``-shaped source for the guard
+    to parse. The ``method_body`` is injected verbatim as a method of the
+    fabricated ``Robinhood`` class (caller provides a ``def`` at col 0).
+
+    The remaining Phase-A methods are generated with proper dispatcher
+    wiring so the guard only flags issues with the injected method.
+    """
+    import textwrap
+
+    injected = textwrap.indent(textwrap.dedent(method_body).strip("\n") + "\n", "    ")
+    companions = textwrap.indent(
+        textwrap.dedent(
+            """
+            def order_history(self):
+                try:
+                    return self.get_url("/orders/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            def dividends(self):
+                try:
+                    return self.get_url("/dividends/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            def positions(self):
+                try:
+                    return self.get_url("/positions/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            def securities_owned(self):
+                try:
+                    return self.get_url("/securities/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            def get_watchlists(self):
+                try:
+                    return self.get_url("/watchlists/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            """
+        ).strip("\n")
+        + "\n",
+        "    ",
     )
+    return "class Robinhood:\n" + injected + companions
+
+
+def test_phase_a_guard_rejects_method_with_unrelated_try_and_unwrapped_get_url():
+    """RED for #158: a Phase-A method with an UNRELATED try + an unwrapped
+    ``self.get_url(...)`` must be flagged as an offender. The previous loose
+    ``_has_dispatcher`` returned True on ANY ast.Try regardless of whether
+    the HTTP call sat inside it — this is the blind spot #158 called out.
+    """
+    trap = """
+def portfolio(self):
+    try:
+        json.loads(something)
+    except json.JSONDecodeError:
+        pass
+    return self.get_url("/portfolio/")
+"""
+    source = _fabricate_robinhood_source_with(trap)
+
+    offenders, not_found = _collect_phase_a_offenders(source)
+
+    assert not not_found, f"all Phase-A methods must be present: {not_found}"
+    offender_names = [name for name, _ in offenders]
+    assert "portfolio" in offender_names, (
+        "tight guard must flag ``portfolio`` — the try is unrelated to the "
+        "unwrapped self.get_url(...) call. Got: "
+        f"{offenders}"
+    )
+
+
+def test_phase_a_guard_accepts_method_with_proper_dispatcher_wrap():
+    """GREEN: a Phase-A method with correct dispatcher wiring must pass."""
+    good = """
+def portfolio(self):
+    try:
+        return self.get_url("/portfolio/")
+    except requests.exceptions.HTTPError as e:
+        _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+"""
+    source = _fabricate_robinhood_source_with(good)
+
+    offenders, not_found = _collect_phase_a_offenders(source)
+
+    assert not not_found
+    assert offenders == [], f"should have no offenders; got {offenders}"
+
+
+def test_phase_a_guard_rejects_method_with_try_but_non_dispatching_handler():
+    """Same-shape as #144 / cancel_order pre-PR #13: try/except exists AND
+    wraps the call, but the except handler raises an unrelated exception
+    instead of dispatching via ``_raise_for_http_error``.
+    """
+    trap = """
+def portfolio(self):
+    try:
+        return self.get_url("/portfolio/")
+    except requests.exceptions.HTTPError:
+        raise ValueError("bad")
+"""
+    source = _fabricate_robinhood_source_with(trap)
+
+    offenders, _ = _collect_phase_a_offenders(source)
+    offender_names = [name for name, _ in offenders]
+    assert "portfolio" in offender_names
