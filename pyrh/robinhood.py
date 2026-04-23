@@ -1430,7 +1430,16 @@ class Robinhood(InstrumentManager, SessionManager):
             if value is not None:
                 payload[field] = value
 
-        res = self.post(urls.orders(), data=payload)
+        # Issue #147: wrap POST with shared HTTPError dispatcher so 5xx /
+        # 429 / 4xx propagate as distinct pyrh exceptions instead of
+        # leaking raw requests.HTTPError. Reuses RobinhoodOrderSubmissionError
+        # introduced by PR #13 (#148) as the 4xx fallback.
+        try:
+            res = self.post(urls.orders(), data=payload)
+        except requests.exceptions.HTTPError as err_msg:
+            _raise_for_http_error(
+                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+            )
         return res
 
     # TODO: Fix function complexity
@@ -1608,7 +1617,15 @@ class Robinhood(InstrumentManager, SessionManager):
             if value is not None:
                 payload[field] = value
 
-        res = self.post(urls.orders(), data=payload)
+        # Issue #147: wrap POST with shared HTTPError dispatcher — see
+        # submit_sell_order above for rationale. Reuses
+        # RobinhoodOrderSubmissionError from PR #13 (#148).
+        try:
+            res = self.post(urls.orders(), data=payload)
+        except requests.exceptions.HTTPError as err_msg:
+            _raise_for_http_error(
+                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+            )
         return res
 
     def place_order(
@@ -1664,7 +1681,15 @@ class Robinhood(InstrumentManager, SessionManager):
         else:
             payload["price"] = float(price)
 
-        res = self.post(urls.orders(), data=payload)
+        # Issue #147: wrap POST with shared HTTPError dispatcher — see
+        # submit_sell_order for rationale. Reuses
+        # RobinhoodOrderSubmissionError from PR #13 (#148).
+        try:
+            res = self.post(urls.orders(), data=payload)
+        except requests.exceptions.HTTPError as err_msg:
+            _raise_for_http_error(
+                err_msg, fallback_exc=RobinhoodOrderSubmissionError
+            )
         return res
 
     def place_buy_order(self, instrument, quantity, ask_price=0.0):
@@ -1787,15 +1812,15 @@ class Robinhood(InstrumentManager, SessionManager):
                         res = self.post(order["cancel"])
                         return res
                     except requests.exceptions.HTTPError as err_msg:
-                        # Issue #147 (not #148): POST-path dispatcher wiring
-                        # is tracked separately. Kept as ``raise ValueError``
-                        # intentionally until #147 lands; #148 scope is
-                        # the two ``get_url`` call sites only.
-                        raise ValueError(
-                            "Failed to cancel order ID: "
-                            + order_id
-                            + "\n Error message: "
-                            + repr(err_msg)
+                        # Issue #147: POST-path dispatcher wiring —
+                        # replaces the legacy ``raise ValueError`` with
+                        # the shared dispatcher so 5xx / 429 / 4xx
+                        # propagate as distinct pyrh exceptions. Reuses
+                        # RobinhoodOrderSubmissionError from PR #13 (#148)
+                        # as the 4xx fallback.
+                        _raise_for_http_error(
+                            err_msg,
+                            fallback_exc=RobinhoodOrderSubmissionError,
                         )
 
         elif isinstance(order_id, dict):
@@ -1819,11 +1844,11 @@ class Robinhood(InstrumentManager, SessionManager):
                         res = self.post(order["cancel"])
                         return res
                     except requests.exceptions.HTTPError as err_msg:
-                        raise ValueError(
-                            "Failed to cancel order ID: "
-                            + order_id
-                            + "\n Error message: "
-                            + repr(err_msg)
+                        # Issue #147: dict-branch twin of the str-branch
+                        # POST dispatcher above. See rationale there.
+                        _raise_for_http_error(
+                            err_msg,
+                            fallback_exc=RobinhoodOrderSubmissionError,
                         )
 
         elif not isinstance(order_id, str) or not isinstance(order_id, dict):
