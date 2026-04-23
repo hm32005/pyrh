@@ -326,17 +326,38 @@ def test_post_methods_no_response_raises_fallback(site_label, invoke):
 #     #   method family">
 #     # Reviewer: <name + YYYY-MM-DD when the exemption was approved>
 #
-# Example entry (active) — none today; the allowlist is intentionally
-# empty so every ``self.post(...)`` call site dispatches via
-# ``_raise_for_http_error``. When the first exemption is added, it MUST
-# follow the template above. For reference, the GET-path twin allowlist
-# in ``test_robinhood_phase_c_and_142_http_error_mapping.py`` has a
-# worked example (the ``get_url`` self-reference seam).
-#
 # The meta-test ``test_exempt_post_allowlist_has_exemption_process_documented``
 # asserts that each template field string is present in this declaration
 # block, so removing the fields breaks the suite.
-EXEMPT_UNWRAPPED_POST_METHODS: frozenset = frozenset()
+EXEMPT_UNWRAPPED_POST_METHODS: frozenset = frozenset(
+    {
+        # Method: "cancel_order"
+        # Issue link: https://github.com/hm32005/investment-system-docs/issues/162
+        # Justification: ``cancel_order`` has an OUTER ``self.post(order["cancel"])``
+        #   wrapped in a retry-on-HTTPError try whose handler attempts a
+        #   nested retry POST. The OUTER handler does NOT dispatch directly
+        #   — it delegates to the nested try, whose INNER handler DOES
+        #   dispatch via ``_raise_for_http_error`` (both str-branch line
+        #   ~2006 and dict-branch line ~2044). Before #162, the loose
+        #   ``ast.walk(handler)`` helper treated the outer handler as
+        #   dispatching (finding the inner call transitively); after #162
+        #   the tight helper correctly flags the outer post. The intent is
+        #   preserved: a transient HTTPError on the outer post triggers the
+        #   retry path (which IS dispatcher-wrapped); any other outcome
+        #   propagates normally. Refactoring ``cancel_order`` to dispatch
+        #   at the outer level would change production retry semantics —
+        #   out of scope for P3 test-hygiene. See
+        #   ``test_post_guard_cancel_order_nested_retry_shape_documented``
+        #   for the shape pin and the runtime error-mapping tests for the
+        #   inner dispatch behaviour.
+        # Sunset condition: remove this exemption when ``cancel_order`` is
+        #   refactored to dispatch at the outer ``except`` handler (e.g.
+        #   via a dedicated retry helper that dispatches on final failure).
+        #   Track under a future issue.
+        # Reviewer: PR author, 2026-04-22 (#162 nested-try tightening).
+        "cancel_order",
+    }
+)
 
 
 def test_no_unwrapped_self_post_call_sites_on_robinhood_class():
@@ -516,19 +537,21 @@ def test_post_guard_cancel_order_nested_retry_shape_documented():
             except requests.HTTPError as e:
                 _raise_for_http_error(e, fallback_exc=...)
 
-    Current tight-guard semantics (``_handler_calls_dispatcher`` does
-    ``ast.walk(handler)``) classify BOTH posts as dispatcher-wrapped,
-    because the outer handler's subtree contains the inner handler's
-    ``_raise_for_http_error`` call. This is a known looseness: a
-    handler that contains a nested try whose handler dispatches is
-    treated as itself dispatching, even though the outer exception
-    path (retry-success or retry-failure-of-a-different-class) does
-    not dispatch the original exception.
+    Issue #162 tightened ``_handler_calls_dispatcher`` to stop crossing
+    nested-try boundaries. Previously ``ast.walk(handler)`` treated the
+    outer handler's subtree as containing the inner handler's
+    ``_raise_for_http_error`` call, so BOTH posts passed. The tight helper
+    walks only the handler's direct body and treats nested ``ast.Try``
+    subtrees as opaque; the outer handler no longer gets credit for the
+    inner handler's dispatch.
 
-    Pinning the current semantics here so the follow-up tightening
-    (tracked under the Phase A/B/discovery/options consolidation, which
-    also addresses the even-weaker ``isinstance(n, ast.Try)`` guards)
-    has a reviewer-visible record of what "tight" means today.
+    Consequence: the outer post is legitimately flagged by the POST
+    surface scan. ``cancel_order`` is explicitly listed in
+    ``EXEMPT_UNWRAPPED_POST_METHODS`` with a full justification block
+    (the retry shape is intentional production behaviour; dispatching
+    at the outer level would change retry semantics). This test pins
+    the tightened semantic so any regression to the loose helper is
+    caught.
     """
     from tests._ast_guard_helpers import (
         _inside_try_with_dispatcher,
@@ -556,11 +579,10 @@ def test_post_guard_cancel_order_nested_retry_shape_documented():
 
     # Inner post: enclosing try's handler dispatches directly -> ACCEPT.
     assert _inside_try_with_dispatcher(method, inner_post) is True
-    # Outer post: enclosing try's handler contains a nested try whose
-    # handler dispatches. Current semantics accept this (ast.walk crosses
-    # the nested try boundary). Documented as known looseness — see
-    # follow-up issue for the stricter "handler-own-body-only" rule.
-    assert _inside_try_with_dispatcher(method, outer_post) is True
+    # Outer post (post-#162): enclosing try's handler contains a nested
+    # try whose handler dispatches, but the outer handler itself does NOT
+    # call _raise_for_http_error. The tight helper correctly REJECTS.
+    assert _inside_try_with_dispatcher(method, outer_post) is False
 
 
 def test_post_guard_rejects_bare_try_no_handler_dispatch():
