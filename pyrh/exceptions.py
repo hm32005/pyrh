@@ -30,16 +30,54 @@ class AuthenticationError(PyrhException):
     pass
 
 
-class InvalidTickerSymbol(PyrhException):
-    """When an invalid ticker (stock symbol) is given/"""
+def _with_context(base_message: str, context: str) -> str:
+    """Append a rendered context string to a base exception message.
 
-    pass
+    Helper used by the fallback exception classes that now accept an optional
+    ``context_str`` positional argument (issue #150 — dispatcher context
+    kwarg). When ``context`` is empty (the legacy calling pattern) the base
+    message is returned verbatim so existing callers see byte-identical
+    messages to pre-PR pyrh releases (backwards-compatibility invariant).
+
+    Format: ``"{base_message} ({context})"``. The context string is produced
+    by ``pyrh.robinhood._format_context`` and looks like ``"order_id=abc"``
+    or ``"ticker=AAPL, side=buy"``.
+    """
+    if context:
+        return f"{base_message} ({context})"
+    return base_message
+
+
+class InvalidTickerSymbol(PyrhException):
+    """When an invalid ticker (stock symbol) is given.
+
+    Issue #150: accepts an optional positional ``context_str`` so the
+    dispatcher can surface the ticker (or other resource id) that triggered
+    the 4xx in the exception message. When no context is passed the argument
+    list is empty — identical to the pre-#150 constructor signature.
+    """
+
+    def __init__(self, context_str: str = "") -> None:
+        super().__init__(
+            _with_context("Invalid or unknown ticker symbol", context_str)
+            if context_str
+            else ""
+        )
 
 
 class InvalidOptionId(PyrhException):
-    """When an invalid option id is given/"""
+    """When an invalid option id is given.
 
-    pass
+    Issue #150: accepts an optional positional ``context_str``. See
+    ``InvalidTickerSymbol`` for rationale / BC invariant.
+    """
+
+    def __init__(self, context_str: str = "") -> None:
+        super().__init__(
+            _with_context("Invalid or unknown option id", context_str)
+            if context_str
+            else ""
+        )
 
 
 class RobinhoodServerError(PyrhException):
@@ -49,14 +87,26 @@ class RobinhoodServerError(PyrhException):
     5xx code, so callers don't waste time second-guessing their ticker input
     when the real problem is that Robinhood is down. See investment-system-docs
     issue #79.
+
+    Issue #150: accepts an optional positional ``context_str`` after
+    ``status_code`` so the dispatcher can surface the resource id that
+    triggered the 5xx in the message. The legacy (status_code-only) calling
+    pattern is preserved — when no context is passed the message is
+    byte-identical to pre-#150 pyrh releases.
     """
 
-    def __init__(self, status_code: int, message: str | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        context_str: str = "",
+        message: str | None = None,
+    ) -> None:
         self.status_code = status_code
         if message is None:
-            message = (
+            base = (
                 f"Robinhood returned {status_code} — server error, try again later."
             )
+            message = _with_context(base, context_str)
         super().__init__(message)
 
 
@@ -75,9 +125,17 @@ class RobinhoodResourceError(PyrhException):
     the shared HTTPError dispatcher onto those 6 methods, and needed a
     semantically-neutral 4xx fallback distinct from ``InvalidTickerSymbol``
     (quotes/fundamentals) and ``InvalidOptionId`` (options).
+
+    Issue #150: accepts an optional positional ``context_str``. Legacy
+    no-arg calls remain BC.
     """
 
-    pass
+    def __init__(self, context_str: str = "") -> None:
+        super().__init__(
+            _with_context("Robinhood resource error", context_str)
+            if context_str
+            else ""
+        )
 
 
 class RobinhoodOrderSubmissionError(PyrhException):
@@ -106,9 +164,19 @@ class RobinhoodOrderSubmissionError(PyrhException):
     Paired with issue #147 (POST-path order-submission dispatcher), which
     will reuse this class for ``submit_buy_order``, ``submit_sell_order``,
     and ``place_order``.
+
+    Issue #150: accepts an optional positional ``context_str``. Legacy
+    no-arg calls remain BC.
     """
 
-    pass
+    def __init__(self, context_str: str = "") -> None:
+        super().__init__(
+            _with_context(
+                "Order submission or cancellation failed", context_str
+            )
+            if context_str
+            else ""
+        )
 
 
 class RobinhoodRateLimitError(PyrhException):
@@ -119,15 +187,23 @@ class RobinhoodRateLimitError(PyrhException):
     server via the ``Retry-After`` header) is exposed as an int of seconds
     so callers can back off appropriately. Retry logic itself is a consumer
     concern (see issue #79 scope note).
+
+    Issue #150: accepts an optional ``context_str`` kwarg so the dispatcher
+    can surface the resource id that triggered the 429. Legacy calls remain
+    BC (retry_after-only signature).
     """
 
     def __init__(
-        self, retry_after: int | None = None, message: str | None = None
+        self,
+        retry_after: int | None = None,
+        message: str | None = None,
+        context_str: str = "",
     ) -> None:
         self.retry_after = retry_after
         if message is None:
             hint = (
                 f" (retry after {retry_after}s)" if retry_after is not None else ""
             )
-            message = f"Robinhood rate limit hit (HTTP 429){hint}."
+            base = f"Robinhood rate limit hit (HTTP 429){hint}."
+            message = _with_context(base, context_str)
         super().__init__(message)

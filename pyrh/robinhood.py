@@ -2,7 +2,7 @@
 """robinhood.py: a collection of utilities for working with Robinhood's Private API."""
 
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import unquote
 
 import pendulum
@@ -44,10 +44,30 @@ class Transaction(Enum):
     SELL = "sell"
 
 
+def _format_context(context: Mapping[str, Any] | None) -> str:
+    """Render a context mapping as ``"k1=v1, k2=v2"`` for exception messages.
+
+    Issue #150: the dispatcher ``_raise_for_http_error`` now accepts an
+    optional ``context`` mapping so each call site can surface the resource
+    id (order id, ticker, instrument url, tag, option id, etc.) that
+    triggered the HTTP error. This helper produces the string form; an
+    empty or ``None`` mapping returns ``""`` so the BC branch in each
+    exception class treats it as "no context" and leaves the legacy
+    message unchanged.
+
+    Values are rendered with ``str()``; non-string context values (ints,
+    floats, yarl URLs) stringify naturally without exploding.
+    """
+    if not context:
+        return ""
+    return ", ".join(f"{key}={value}" for key, value in context.items())
+
+
 def _raise_for_http_error(
     err: requests.exceptions.HTTPError,
     *,
     fallback_exc: type = InvalidTickerSymbol,
+    context: Mapping[str, Any] | None = None,
 ) -> None:
     """Translate a ``requests.HTTPError`` from a quote/fundamentals/options call
     into the right pyrh exception based on status code.
@@ -72,16 +92,27 @@ def _raise_for_http_error(
             passes ``InvalidOptionId``. This preserves the legacy "bad input"
             signal per-endpoint while letting 5xx / 429 propagate as
             server/rate-limit errors.
+        context: optional mapping of resource-id fields (e.g.
+            ``{"order_id": order_id}``, ``{"ticker": symbol}``,
+            ``{"instrument_url": url}``) that gets rendered into the raised
+            exception's message for debuggability. Issue #150: closes the
+            regression where the dispatcher lost the resource context that
+            the legacy ``raise ValueError("Failed for order_id: " + ...)``
+            pattern used to carry. When ``None`` / empty the exception
+            message is byte-identical to pre-#150 pyrh releases
+            (backwards-compatibility invariant).
 
     Always re-raises — never returns — and uses ``from None`` so the HTTP
     stack trace does not leak to callers (matches the pattern shipped for
     ``_try_refresh`` in the auth refactor).
     """
+    context_str = _format_context(context)
+
     response = getattr(err, "response", None)
     status_code = getattr(response, "status_code", None) if response is not None else None
 
     if status_code is not None and 500 <= status_code < 600:
-        raise RobinhoodServerError(status_code) from None
+        raise RobinhoodServerError(status_code, context_str) from None
     if status_code == 429:
         retry_after_raw = (
             response.headers.get("Retry-After") if response is not None else None
@@ -90,8 +121,10 @@ def _raise_for_http_error(
             retry_after = int(retry_after_raw) if retry_after_raw is not None else None
         except (TypeError, ValueError):
             retry_after = None
-        raise RobinhoodRateLimitError(retry_after=retry_after) from None
-    raise fallback_exc() from None
+        raise RobinhoodRateLimitError(
+            retry_after=retry_after, context_str=context_str
+        ) from None
+    raise fallback_exc(context_str) from None
 
 
 # Backwards-compatible alias. Keeps any external caller (test helpers, fixtures,
