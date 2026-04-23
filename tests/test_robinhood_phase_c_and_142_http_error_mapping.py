@@ -54,6 +54,14 @@ Fallback rationale (per-method):
       user-facing errors. Fallback: ``InvalidTickerSymbol``.
     * ``get_historical_quotes`` — takes a ticker. Legacy "bad ticker"
       signal fits. Fallback: ``InvalidTickerSymbol``.
+
+Exemption process
+-----------------
+Methods that intentionally skip the dispatcher go in the
+``EXEMPT_UNWRAPPED_GET_URL_METHODS`` allowlist below (currently
+line 307). See the comment block above that declaration for the
+full template — Method / Issue link / Justification / Sunset
+condition / Reviewer — required for every new entry (issue #149).
 """
 from unittest.mock import patch
 
@@ -274,11 +282,41 @@ def test_phase_c_and_142_methods_no_response_raises_fallback(method_name):
 # ``try/except requests.HTTPError`` dispatcher. Each entry requires a
 # justification comment — adding a name to this list should be a deliberate
 # reviewer-visible decision.
+#
+# Exemption process (issue #149)
+# ------------------------------
+# Adding an entry here bypasses the #142/#144 surface-scan guard. Reviewers
+# cannot approve an exemption without knowing WHY it is safe and WHEN it
+# should be re-audited. Every new entry MUST carry a block comment
+# immediately above (or inline after) the string literal with all five
+# template fields:
+#
+#     # Method: <method_name_as_string_literal>
+#     # Issue link: <github issue URL documenting the exemption, or N/A>
+#     # Justification: <why this method does NOT need the dispatcher;
+#     #   e.g. "delegates to SessionManager.get and wrapping would
+#     #   cause double-dispatch">
+#     # Sunset condition: <under what future change does this exemption
+#     #   lapse; e.g. "never — this IS the dispatcher seam", or "when
+#     #   issue #X lands we should re-audit">
+#     # Reviewer: <name + YYYY-MM-DD when the exemption was approved>
+#
+# The meta-test ``test_exempt_get_url_allowlist_has_exemption_process_documented``
+# asserts that each template field string is present in this declaration
+# block, so removing the fields breaks the suite.
 EXEMPT_UNWRAPPED_GET_URL_METHODS = frozenset(
     {
-        # ``get_url`` is the dispatcher seam itself — it delegates to
-        # ``SessionManager.get``, which handles the request. Wrapping it
-        # would wrap everything twice.
+        # Method: "get_url"
+        # Issue link: N/A (sibling helper of the dispatcher)
+        # Justification: ``get_url`` is ``Robinhood.get_url`` itself, which
+        #   the wrapper ``_raise_for_http_error`` already delegates to via
+        #   ``SessionManager.get``. Wrapping the seam in its own dispatcher
+        #   would either recurse indefinitely or double-dispatch every
+        #   downstream GET call site.
+        # Sunset condition: never. The seam role is structural — if we ever
+        #   split ``get_url`` into a thin wrapper over a new seam method,
+        #   move this exemption to whichever method becomes the new seam.
+        # Reviewer: PR #12 author, 2026-04-22 (#149 documentation backfill).
         "get_url",
     }
 )
@@ -650,3 +688,77 @@ def test_tightened_guard_passes_on_real_robinhood_module():
         "_raise_for_http_error -- i.e., unwrapped dispatch:\n"
         + "\n".join(f"  - {name} at line {lineno}" for name, lineno in offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #149 — document the exemption process for
+# ``EXEMPT_UNWRAPPED_GET_URL_METHODS``.
+#
+# Adding a name to the allowlist bypasses the surface-scan guard, so every
+# entry must carry a justification comment that a reviewer can audit.
+# This meta-test pins the template fields in the source so future drift
+# (a contributor adding an entry without the full rationale) is caught by
+# pytest rather than by a human reviewer's memory.
+# ---------------------------------------------------------------------------
+
+
+def test_exempt_get_url_allowlist_has_exemption_process_documented():
+    """Ensure ``EXEMPT_UNWRAPPED_GET_URL_METHODS`` declaration has the
+    expected template fields documented in comments.
+
+    The template (see #149) is:
+
+        # Method: <name>
+        # Issue link: <github issue URL or N/A>
+        # Justification: <why this method does NOT need the dispatcher>
+        # Sunset condition: <when should this be re-added to coverage>
+        # Reviewer: <name + date>
+
+    Prevents future drift where an exempt entry is added without the
+    justification fields a reviewer needs to approve the exemption.
+    The check is scoped to the block that starts at the allowlist
+    declaration and ends at the next top-level ``def`` / ``class`` /
+    ``# ---`` section break, so the template must live adjacent to the
+    allowlist itself (not elsewhere in the file).
+    """
+    from pathlib import Path
+
+    lines = Path(__file__).read_text().splitlines()
+    decl = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("EXEMPT_UNWRAPPED_GET_URL_METHODS")
+        ),
+        None,
+    )
+    assert decl is not None, "Allowlist declaration not found in this file."
+    # Walk backward from the declaration to the nearest section-break
+    # comment (``# ---``) and forward until the declaration body closes
+    # and we hit the next top-level ``def`` / ``class`` / section break.
+    # Everything in between is the allowlist's documentation region.
+    start = 0
+    for i in range(decl - 1, -1, -1):
+        if lines[i].startswith("# ---"):
+            start = i
+            break
+    end = len(lines)
+    for i in range(decl + 1, len(lines)):
+        line = lines[i]
+        if line.startswith(("def ", "class ", "# ---")):
+            end = i
+            break
+    region = "\n".join(lines[start:end])
+    for field in (
+        "# Method:",
+        "# Issue link:",
+        "# Justification:",
+        "# Sunset condition:",
+        "# Reviewer:",
+    ):
+        assert field in region, (
+            f"EXEMPT_UNWRAPPED_GET_URL_METHODS template field {field!r} "
+            "missing from the allowlist declaration block. Each exempt "
+            "entry must follow the template documented adjacent to the "
+            "allowlist (issue #149)."
+        )

@@ -43,6 +43,16 @@ the order actually went through (idempotency key + order-status query).
 The dispatcher converts 5xx to ``RobinhoodServerError`` but DOES NOT
 retry automatically — adding retry here would risk duplicate orders.
 This is documented in the ``RobinhoodOrderSubmissionError`` docstring.
+
+Exemption process
+-----------------
+Methods that intentionally skip the POST dispatcher go in the
+``EXEMPT_UNWRAPPED_POST_METHODS`` allowlist below (currently line
+339 — the set ships empty). See the comment block above that
+declaration for the full template — Method / Issue link /
+Justification / Sunset condition / Reviewer — required for every
+new entry (issue #152). Write-path exemptions are expected to be
+rare because order-submission paths have idempotency concerns.
 """
 import ast
 from pathlib import Path
@@ -296,6 +306,36 @@ def test_post_methods_no_response_raises_fallback(site_label, invoke):
 # Methods on ``Robinhood`` that are intentionally NOT wrapped in a
 # ``try/except requests.HTTPError`` dispatcher on their ``self.post(...)``
 # call sites. Each entry requires a justification comment.
+#
+# Exemption process (issue #152)
+# ------------------------------
+# Adding an entry here bypasses the POST surface-scan guard. Reviewers
+# cannot approve an exemption without knowing WHY it is safe and WHEN it
+# should be re-audited. Every new entry MUST carry a block comment
+# immediately above (or inline after) the string literal with all five
+# template fields:
+#
+#     # Method: <method_name_as_string_literal>
+#     # Issue link: <github issue URL documenting the exemption, or N/A>
+#     # Justification: <why this POST call site does NOT need the
+#     #   dispatcher; note that order-submission paths have idempotency
+#     #   concerns — see ``RobinhoodOrderSubmissionError`` docstring —
+#     #   so exemptions on write paths should be rare and well-argued>
+#     # Sunset condition: <under what future change does this exemption
+#     #   lapse; e.g. "when issue #X introduces a shared seam for this
+#     #   method family">
+#     # Reviewer: <name + YYYY-MM-DD when the exemption was approved>
+#
+# Example entry (active) — none today; the allowlist is intentionally
+# empty so every ``self.post(...)`` call site dispatches via
+# ``_raise_for_http_error``. When the first exemption is added, it MUST
+# follow the template above. For reference, the GET-path twin allowlist
+# in ``test_robinhood_phase_c_and_142_http_error_mapping.py`` has a
+# worked example (the ``get_url`` self-reference seam).
+#
+# The meta-test ``test_exempt_post_allowlist_has_exemption_process_documented``
+# asserts that each template field string is present in this declaration
+# block, so removing the fields breaks the suite.
 EXEMPT_UNWRAPPED_POST_METHODS: frozenset = frozenset()
 
 
@@ -785,3 +825,71 @@ def test_post_guard_tight_scan_passes_on_real_module():
         "POST call site:\n"
         + "\n".join(f"  - {name} at line {lineno}" for name, lineno in offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #152 — document the exemption process for
+# ``EXEMPT_UNWRAPPED_POST_METHODS``.
+#
+# Twin of the #149 meta-test in the GET-path module. The POST allowlist
+# currently ships empty, but the template header must already be present
+# so the first contributor who needs an exemption has a shape to follow.
+# ---------------------------------------------------------------------------
+
+
+def test_exempt_post_allowlist_has_exemption_process_documented():
+    """Ensure ``EXEMPT_UNWRAPPED_POST_METHODS`` declaration has the
+    expected template fields documented in comments.
+
+    The template (see #152) is:
+
+        # Method: <name>
+        # Issue link: <github issue URL or N/A>
+        # Justification: <why this method does NOT need the dispatcher>
+        # Sunset condition: <when should this be re-added to coverage>
+        # Reviewer: <name + date>
+
+    Prevents future drift where an exempt entry is added without the
+    justification fields a reviewer needs to approve the exemption.
+    The check is scoped to the block that starts at the allowlist
+    declaration and ends at the next top-level ``def`` / ``class`` /
+    ``# ---`` section break, so the template must live adjacent to the
+    allowlist itself (not elsewhere in the file).
+    """
+    lines = Path(__file__).read_text().splitlines()
+    decl = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("EXEMPT_UNWRAPPED_POST_METHODS")
+        ),
+        None,
+    )
+    assert decl is not None, "Allowlist declaration not found in this file."
+    # Walk backward to the nearest section-break (``# ---``) and forward
+    # to the next top-level ``def`` / ``class`` / section break.
+    start = 0
+    for i in range(decl - 1, -1, -1):
+        if lines[i].startswith("# ---"):
+            start = i
+            break
+    end = len(lines)
+    for i in range(decl + 1, len(lines)):
+        line = lines[i]
+        if line.startswith(("def ", "class ", "# ---")):
+            end = i
+            break
+    region = "\n".join(lines[start:end])
+    for field in (
+        "# Method:",
+        "# Issue link:",
+        "# Justification:",
+        "# Sunset condition:",
+        "# Reviewer:",
+    ):
+        assert field in region, (
+            f"EXEMPT_UNWRAPPED_POST_METHODS template field {field!r} "
+            "missing from the allowlist declaration block. Each exempt "
+            "entry must follow the template documented adjacent to the "
+            "allowlist (issue #152)."
+        )
