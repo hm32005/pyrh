@@ -42,19 +42,34 @@ class Transaction(Enum):
     SELL = "sell"
 
 
-def _raise_for_quote_http_error(err: requests.exceptions.HTTPError) -> None:
-    """Translate a ``requests.HTTPError`` from a quote/fundamentals call into
-    the right pyrh exception based on status code.
+def _raise_for_http_error(
+    err: requests.exceptions.HTTPError,
+    *,
+    fallback_exc: type = InvalidTickerSymbol,
+) -> None:
+    """Translate a ``requests.HTTPError`` from a quote/fundamentals/options call
+    into the right pyrh exception based on status code.
 
-    See investment-system-docs issue #79 for context: previously every HTTP
-    error was masked as ``InvalidTickerSymbol``, so users thought their
-    ticker was bad when Robinhood was actually down or rate-limiting.
+    See investment-system-docs issue #79 (quote/fundamentals) and #125 (options)
+    for context: previously every HTTP error on these paths was masked as a
+    single "bad input" exception (``InvalidTickerSymbol`` or ``InvalidOptionId``),
+    so users thought their input was bad when Robinhood was actually down or
+    rate-limiting.
 
     Dispatch:
         * 5xx              -> ``RobinhoodServerError``
         * 429              -> ``RobinhoodRateLimitError`` (with ``Retry-After``)
-        * any other 4xx    -> ``InvalidTickerSymbol`` (unchanged behaviour)
-        * no ``.response`` -> ``InvalidTickerSymbol`` (defensive fallback)
+        * any other 4xx    -> ``fallback_exc()`` (unchanged per-caller behaviour)
+        * no ``.response`` -> ``fallback_exc()`` (defensive fallback)
+
+    Args:
+        err: the ``requests.HTTPError`` the caller intercepted.
+        fallback_exc: the exception class to raise for 4xx-not-429 and for the
+            no-``.response`` defensive branch. Quote/fundamentals sites pass
+            ``InvalidTickerSymbol`` (the default); the options-quote site
+            passes ``InvalidOptionId``. This preserves the legacy "bad input"
+            signal per-endpoint while letting 5xx / 429 propagate as
+            server/rate-limit errors.
 
     Always re-raises — never returns — and uses ``from None`` so the HTTP
     stack trace does not leak to callers (matches the pattern shipped for
@@ -74,7 +89,14 @@ def _raise_for_quote_http_error(err: requests.exceptions.HTTPError) -> None:
         except (TypeError, ValueError):
             retry_after = None
         raise RobinhoodRateLimitError(retry_after=retry_after) from None
-    raise InvalidTickerSymbol() from None
+    raise fallback_exc() from None
+
+
+# Backwards-compatible alias. Keeps any external caller (test helpers, fixtures,
+# downstream forks) that imports the old name working. The body is identical —
+# ``_raise_for_http_error`` defaults ``fallback_exc`` to ``InvalidTickerSymbol``,
+# which is what the old helper always raised on the 4xx-not-429 branch.
+_raise_for_quote_http_error = _raise_for_http_error
 
 
 class Robinhood(InstrumentManager, SessionManager):
@@ -122,7 +144,7 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_quote_http_error(e)
+            _raise_for_http_error(e)
 
         return data
 
@@ -145,7 +167,7 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             data = self.get_url(url)
         except requests.exceptions.HTTPError as e:
-            _raise_for_quote_http_error(e)
+            _raise_for_http_error(e)
 
         return data["results"]
 
@@ -596,8 +618,13 @@ class Robinhood(InstrumentManager, SessionManager):
         try:
             market_data = self.get_url(urls.market_data(option_id)) or {}
             return market_data
-        except requests.exceptions.HTTPError:
-            raise InvalidOptionId()
+        except requests.exceptions.HTTPError as e:
+            # Issue #125: previously *any* HTTPError (5xx outage, 429 rate
+            # limit, 404 bad id) collapsed to ``InvalidOptionId``. The
+            # dispatcher now routes 5xx -> RobinhoodServerError and 429 ->
+            # RobinhoodRateLimitError while preserving the legacy
+            # InvalidOptionId mapping for the 4xx-not-429 branch.
+            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
 
     def options_owned(self):
         options = self.get_url(urls.OPTIONS_BASE.join(URL("positions/?nonzero=true")))
@@ -673,7 +700,7 @@ class Robinhood(InstrumentManager, SessionManager):
             data = self.get_url(url)
             return data
         except requests.exceptions.HTTPError as e:
-            _raise_for_quote_http_error(e)
+            _raise_for_http_error(e)
 
     ###########################################################################
     #                           PORTFOLIOS DATA
