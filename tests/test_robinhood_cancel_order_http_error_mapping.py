@@ -19,12 +19,13 @@ dispatcher rollout (#79, #125, #135, #137 Phases A/B/C, #142).
 
 Scope note
 ----------
-``cancel_order`` also contains TWO ``self.post(order["cancel"])`` call
-sites whose HTTPError handlers still raise ``ValueError``. Those are
-tracked by issue #147 (POST-path order-submission dispatcher) and are
-out of scope for #148. This test module exercises the two ``get_url``
-call sites only, which is what #148 is about. #147 will reuse the same
-``RobinhoodOrderSubmissionError`` class introduced by this PR.
+This test module exercises the two ``self.get_url(urls.orders(order_id))``
+call sites only, which is what #148 is about. The companion
+``self.post(order["cancel"])`` call sites in ``cancel_order`` are
+covered by issue #147 (POST-path order-submission dispatcher) in
+``test_robinhood_post_path_order_submission_http_error_mapping.py``,
+which reuses the ``RobinhoodOrderSubmissionError`` class introduced
+by this PR.
 
 Contract (per-branch)
 ---------------------

@@ -260,10 +260,13 @@ def test_phase_c_and_142_methods_no_response_raises_fallback(method_name):
 # this test, forcing the author to either wrap the call or add an explicit
 # allowlist entry with a reviewer-visible justification.
 #
-# Scope: ``get_url`` only. Post / put / delete paths on
-# ``submit_buy_order`` / ``submit_sell_order`` / ``place_order`` are
-# known unwrapped (pre-existing scope, not #137 / #142); a follow-up issue
-# tracks them separately rather than silently widening this PR.
+# Scope: ``get_url`` only. POST paths on
+# ``submit_buy_order`` / ``submit_sell_order`` / ``place_order`` /
+# ``cancel_order`` are now covered by the twin
+# ``test_no_unwrapped_self_post_call_sites_on_robinhood_class`` guard in
+# ``test_robinhood_post_path_order_submission_http_error_mapping.py``
+# (issue #147). Put / delete paths are not yet used anywhere on the
+# ``Robinhood`` class; a future PR can add a similar guard if needed.
 # ---------------------------------------------------------------------------
 
 
