@@ -260,41 +260,35 @@ PHASE_B_METHOD_NAMES = frozenset(
 )
 
 
-def test_all_phase_b_methods_have_http_error_handling():
-    """AST-level guard: every Phase-B method must have dispatcher wiring.
+# ---------------------------------------------------------------------------
+# Tight AST guard implementation (#141 / #158).
+#
+# See the Phase-A guard module for the full rationale. Summary: the previous
+# ``_has_dispatcher`` returned True on any ``ast.Try`` in the method body,
+# even when the try did not wrap the HTTP call. Consolidated here via the
+# shared helpers in ``tests/_ast_guard_helpers.py``.
+# ---------------------------------------------------------------------------
 
-    Scope: the 4 discovery / ancillary methods tracked by issue #137 Phase B.
-    A method is considered "wired" if its body contains either a ``try``
-    block OR a call to ``_raise_for_http_error``.
+
+from tests._ast_guard_helpers import (  # noqa: E402
+    _inside_try_with_dispatcher,
+    _is_self_get_url_call,
+)
+
+
+def _collect_phase_b_offenders(source, method_names=PHASE_B_METHOD_NAMES):
+    """Return ``(offenders, not_found)``.
+
+    ``offenders`` is a list of ``(method_name, lineno)`` for every
+    ``self.get_url(...)`` call site in a Phase-B method that is not
+    wrapped by a dispatching try/except.
+
+    ``not_found`` is the set of expected method names missing from the
+    ``Robinhood`` class — a renamed-method safety net.
     """
     import ast
-    from pathlib import Path
 
-    source = (
-        Path(__file__)
-        .resolve()
-        .parent.parent.joinpath("pyrh/robinhood.py")
-        .read_text()
-    )
     tree = ast.parse(source)
-
-    def _method_calls_http(node: ast.FunctionDef) -> bool:
-        http_call_names = {"get_url", "get", "post", "put", "delete", "patch"}
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-                if n.func.attr in http_call_names:
-                    return True
-        return False
-
-    def _has_dispatcher(node: ast.FunctionDef) -> bool:
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                if n.func.id == "_raise_for_http_error":
-                    return True
-            if isinstance(n, ast.Try):
-                return True
-        return False
-
     robinhood_class = next(
         (
             n
@@ -303,30 +297,152 @@ def test_all_phase_b_methods_have_http_error_handling():
         ),
         None,
     )
-    assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
+    if robinhood_class is None:
+        return [], set(method_names)
 
-    missing = []
+    offenders = []
     seen = set()
-    for node in ast.walk(robinhood_class):
-        if not isinstance(node, ast.FunctionDef):
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
             continue
-        if node.name not in PHASE_B_METHOD_NAMES:
+        if method.name not in method_names:
             continue
-        seen.add(node.name)
-        if not _method_calls_http(node):
-            missing.append(f"{node.name} (no http call found — did the method change?)")
-            continue
-        if not _has_dispatcher(node):
-            missing.append(node.name)
+        seen.add(method.name)
+        for call in ast.walk(method):
+            if not _is_self_get_url_call(call):
+                continue
+            if _inside_try_with_dispatcher(method, call):
+                continue
+            offenders.append((method.name, call.lineno))
 
-    not_found = PHASE_B_METHOD_NAMES - seen
+    return offenders, method_names - seen
+
+
+def test_all_phase_b_methods_have_http_error_handling():
+    """AST-level guard: every Phase-B method's ``self.get_url(...)`` call
+    sites must live inside a ``try/except`` whose handler invokes
+    ``_raise_for_http_error`` (tightened per #141 / #158).
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+
+    offenders, not_found = _collect_phase_b_offenders(source)
+
     assert not not_found, (
         f"Phase B methods not found on Robinhood class: {sorted(not_found)}. "
         "Has a method been renamed or removed? Update PHASE_B_METHOD_NAMES."
     )
-    assert not missing, (
-        "Phase B methods missing HTTPError dispatcher "
-        f"(see issue #137 Phase B): {missing}. "
-        "Wrap the HTTP call in try/except requests.HTTPError and call "
-        "_raise_for_http_error(e, fallback_exc=<per-method>)."
+    if offenders:
+        formatted = "\n".join(
+            f"  - {name} at line {lineno}" for name, lineno in offenders
+        )
+        pytest.fail(
+            "Phase B methods with unwrapped self.get_url(...) call sites "
+            f"(see issue #137 Phase B): \n{formatted}\n\n"
+            "Wrap the HTTP call in try/except requests.HTTPError and call "
+            "_raise_for_http_error(e, fallback_exc=<per-method>)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #141 / #158 — tight-guard boundary tests for Phase B.
+#
+# ``get_popularity`` is the canonical worry: it uses a try around arg
+# validation (e.g. parsing the symbol) but the ``self.get_url(...)`` call
+# itself is unwrapped. Under the loose ``_has_dispatcher`` the method
+# passed because SOME ast.Try existed. The tight guard must flag it.
+# ---------------------------------------------------------------------------
+
+
+def _fabricate_phase_b_source_with(method_body):
+    """Build a minimal ``Robinhood`` source for the Phase-B guard to parse."""
+    import textwrap
+
+    injected = textwrap.indent(textwrap.dedent(method_body).strip("\n") + "\n", "    ")
+    companions = textwrap.indent(
+        textwrap.dedent(
+            """
+            def all_instruments(self):
+                try:
+                    return self.get_url("/instruments/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+            def get_popularity(self, symbol):
+                try:
+                    return self.get_url("/popularity/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=InvalidTickerSymbol)
+            def get_news(self, symbol):
+                try:
+                    return self.get_url("/news/")
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=InvalidTickerSymbol)
+            """
+        ).strip("\n")
+        + "\n",
+        "    ",
     )
+    return "class Robinhood:\n" + injected + companions
+
+
+def test_phase_b_guard_rejects_get_tickers_by_tag_with_unrelated_try_only():
+    """RED for #158 on Phase B: method with an unrelated try (e.g. parsing
+    the tag argument) followed by an unwrapped ``self.get_url(...)`` must
+    be flagged. Loose guard would have accepted due to ANY ast.Try.
+    """
+    trap = """
+def get_tickers_by_tag(self, tag):
+    try:
+        tag = tag.lower()
+    except AttributeError:
+        tag = str(tag)
+    return self.get_url("/tags/" + tag)
+"""
+    source = _fabricate_phase_b_source_with(trap)
+
+    offenders, not_found = _collect_phase_b_offenders(source)
+
+    assert not not_found
+    offender_names = [name for name, _ in offenders]
+    assert "get_tickers_by_tag" in offender_names, (
+        f"tight guard must flag get_tickers_by_tag; got {offenders}"
+    )
+
+
+def test_phase_b_guard_accepts_properly_wrapped_method():
+    """GREEN: properly wrapped Phase-B method must pass."""
+    good = """
+def get_tickers_by_tag(self, tag):
+    try:
+        return self.get_url("/tags/" + tag)
+    except requests.exceptions.HTTPError as e:
+        _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+"""
+    source = _fabricate_phase_b_source_with(good)
+
+    offenders, _ = _collect_phase_b_offenders(source)
+    assert offenders == [], f"expected no offenders; got {offenders}"
+
+
+def test_phase_b_guard_rejects_try_except_that_does_not_dispatch():
+    """Same-shape as #144: try wraps call, but handler raises unrelated
+    exception instead of dispatching.
+    """
+    trap = """
+def get_popularity(self, symbol):
+    try:
+        return self.get_url("/popularity/" + symbol)
+    except requests.exceptions.HTTPError:
+        raise ValueError("bad")
+"""
+    source = _fabricate_phase_b_source_with(trap)
+
+    offenders, _ = _collect_phase_b_offenders(source)
+    offender_names = [name for name, _ in offenders]
+    assert "get_popularity" in offender_names

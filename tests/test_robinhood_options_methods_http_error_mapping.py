@@ -249,44 +249,34 @@ def test_options_methods_http_error_without_response_raises_invalid_option_id(
 # ---------------------------------------------------------------------------
 
 
-def test_all_options_methods_have_http_error_handling():
-    """AST-level guard: no options method may call an HTTP helper without
-    translating ``requests.HTTPError`` via ``_raise_for_http_error`` or a
-    surrounding ``try/except``.
+# ---------------------------------------------------------------------------
+# Tight AST guard implementation (#141 / #158).
+#
+# See the Phase-A guard module for the full rationale. Summary: the previous
+# ``_has_dispatcher`` returned True on any ``ast.Try`` in the method body,
+# even when the try did not wrap the HTTP call. Consolidated here via the
+# shared helpers in ``tests/_ast_guard_helpers.py``.
+#
+# Options scope: methods on ``Robinhood`` whose name contains ``option``
+# (case-insensitive). Discovered dynamically because issue #135 is about
+# "any method in the options surface" — we do not maintain a fixed list.
+# ---------------------------------------------------------------------------
 
-    Scope: methods on ``Robinhood`` whose name contains ``option`` (case
-    insensitive). This is the exact scope of issue #135 — options endpoints.
+
+from tests._ast_guard_helpers import (  # noqa: E402
+    _inside_try_with_dispatcher,
+    _is_self_get_url_call,
+)
+
+
+def _collect_options_offenders(source):
+    """Return a list of ``(method_name, lineno)`` for every ``self.get_url(...)``
+    call site on a ``Robinhood`` method whose name contains ``option``
+    (case-insensitive) that is NOT inside a dispatching try/except.
     """
     import ast
-    from pathlib import Path
 
-    source = Path(
-        __file__
-    ).resolve().parent.parent.joinpath("pyrh/robinhood.py").read_text()
     tree = ast.parse(source)
-
-    def _method_calls_http(node: ast.FunctionDef) -> bool:
-        """Heuristic: does the method body invoke ``self.get_url`` /
-        ``self.get`` / ``self.session.get`` / etc.?"""
-        http_call_names = {"get_url", "get", "post", "put", "delete", "patch"}
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-                if n.func.attr in http_call_names:
-                    return True
-        return False
-
-    def _has_dispatcher(node: ast.FunctionDef) -> bool:
-        """Method body must contain EITHER a ``_raise_for_http_error`` call
-        OR a ``try/except`` block (which covers the equivalent pattern)."""
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                if n.func.id == "_raise_for_http_error":
-                    return True
-            if isinstance(n, ast.Try):
-                return True
-        return False
-
-    # Only walk the Robinhood class, not the module-level helpers.
     robinhood_class = next(
         (
             n
@@ -295,22 +285,117 @@ def test_all_options_methods_have_http_error_handling():
         ),
         None,
     )
-    assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
+    if robinhood_class is None:
+        return []
 
-    methods_without_handling = []
-    for node in ast.walk(robinhood_class):
-        if not isinstance(node, ast.FunctionDef):
+    offenders = []
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
             continue
-        if "option" not in node.name.lower():
+        if "option" not in method.name.lower():
             continue
-        if not _method_calls_http(node):
-            continue
-        if not _has_dispatcher(node):
-            methods_without_handling.append(node.name)
+        for call in ast.walk(method):
+            if not _is_self_get_url_call(call):
+                continue
+            if _inside_try_with_dispatcher(method, call):
+                continue
+            offenders.append((method.name, call.lineno))
+    return offenders
 
-    assert not methods_without_handling, (
-        "Options-endpoint methods missing HTTPError dispatcher "
-        f"(see issue #135): {methods_without_handling}. "
-        "Wrap the HTTP call in try/except requests.HTTPError and call "
-        "_raise_for_http_error(e, fallback_exc=InvalidOptionId)."
+
+def test_all_options_methods_have_http_error_handling():
+    """AST-level guard: every ``option``-named method's ``self.get_url(...)``
+    call sites must live inside a ``try/except`` whose handler invokes
+    ``_raise_for_http_error`` (tightened per #141 / #158).
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
     )
+
+    offenders = _collect_options_offenders(source)
+
+    if offenders:
+        formatted = "\n".join(
+            f"  - {name} at line {lineno}" for name, lineno in offenders
+        )
+        pytest.fail(
+            "Options-endpoint methods with unwrapped self.get_url(...) "
+            f"call sites (see issue #135): \n{formatted}\n\n"
+            "Wrap the HTTP call in try/except requests.HTTPError and call "
+            "_raise_for_http_error(e, fallback_exc=InvalidOptionId)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #141 / #158 — tight-guard boundary tests for options.
+# ---------------------------------------------------------------------------
+
+
+def _fabricate_options_source_with(method_body):
+    """Build a minimal ``Robinhood`` source containing a single
+    option-named method whose body is injected verbatim.
+    """
+    import textwrap
+
+    injected = textwrap.indent(textwrap.dedent(method_body).strip("\n") + "\n", "    ")
+    return "class Robinhood:\n" + injected
+
+
+def test_options_guard_rejects_method_with_unrelated_try_and_unwrapped_get_url():
+    """RED for #158 on options: option-named method with an unrelated try
+    and an unwrapped ``self.get_url(...)`` must be flagged. Loose guard
+    would accept due to ANY ast.Try.
+    """
+    trap = """
+def get_option_market_data(self, option_id):
+    try:
+        option_id = str(option_id)
+    except TypeError:
+        pass
+    return self.get_url("/marketdata/options/" + option_id)
+"""
+    source = _fabricate_options_source_with(trap)
+
+    offenders = _collect_options_offenders(source)
+    offender_names = [name for name, _ in offenders]
+    assert "get_option_market_data" in offender_names, (
+        f"tight guard must flag get_option_market_data; got {offenders}"
+    )
+
+
+def test_options_guard_accepts_properly_wrapped_method():
+    """GREEN: properly wrapped option-named method must pass."""
+    good = """
+def get_option_market_data(self, option_id):
+    try:
+        return self.get_url("/marketdata/options/" + option_id)
+    except requests.exceptions.HTTPError as e:
+        _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+"""
+    source = _fabricate_options_source_with(good)
+
+    offenders = _collect_options_offenders(source)
+    assert offenders == [], f"expected no offenders; got {offenders}"
+
+
+def test_options_guard_rejects_try_except_that_does_not_dispatch():
+    """Same-shape as #144: try wraps the HTTP call, but the except handler
+    raises an unrelated exception instead of dispatching.
+    """
+    trap = """
+def get_option_quote(self, option_id):
+    try:
+        return self.get_url("/quotes/options/" + option_id)
+    except requests.exceptions.HTTPError:
+        raise ValueError("bad option")
+"""
+    source = _fabricate_options_source_with(trap)
+
+    offenders = _collect_options_offenders(source)
+    offender_names = [name for name, _ in offenders]
+    assert "get_option_quote" in offender_names
