@@ -265,7 +265,15 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        return self.get_url(urls.news(stock.upper()))
+        # Issue #137 Phase B: translate HTTP errors via the shared dispatcher.
+        # ``get_news`` takes a ticker, so a 4xx here is legacy "bad ticker"
+        # input (fallback: ``InvalidTickerSymbol``); 5xx / 429 surface as
+        # ``RobinhoodServerError`` / ``RobinhoodRateLimitError`` instead of
+        # leaking raw ``requests.HTTPError``.
+        try:
+            return self.get_url(urls.news(stock.upper()))
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e)
 
     def get_watchlists(self):
         """Fetch watchlists endpoint and queries for
@@ -546,10 +554,21 @@ class Robinhood(InstrumentManager, SessionManager):
             (int): number of users who own the stock
 
         """
-        stock_instrument = self.get_url(self.quote_data(stock)["instrument"])["id"]
-        return self.get_url(urls.instruments(stock_instrument, "popularity"))[
-            "num_open_positions"
-        ]
+        # Issue #137 Phase B: translate HTTP errors via the shared dispatcher.
+        # ``get_popularity`` takes a ticker, so a 4xx fits legacy "bad
+        # ticker" semantics (fallback: ``InvalidTickerSymbol``). Note that
+        # ``quote_data`` is ALREADY wrapped (issue #79 / PR #5), so if the
+        # ticker fails at the quote step it raises through that dispatcher
+        # directly. This wrapper covers the intermediate
+        # ``get_url(self.quote_data(...)["instrument"])`` AND the final
+        # ``get_url(urls.instruments(...))`` call sites.
+        try:
+            stock_instrument = self.get_url(self.quote_data(stock)["instrument"])["id"]
+            return self.get_url(urls.instruments(stock_instrument, "popularity"))[
+                "num_open_positions"
+            ]
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e)
 
     def get_tickers_by_tag(self, tag=None):
         """Get a list of instruments belonging to a tag
@@ -567,18 +586,52 @@ class Robinhood(InstrumentManager, SessionManager):
             (List): a list of Ticker strings
 
         """
-        instrument_list = self.get_url(urls.tags(tag))["instruments"]
-        return [self.get_url(instrument)["symbol"] for instrument in instrument_list]
+        # Issue #137 Phase B: translate HTTP errors via the shared dispatcher.
+        # ``get_tickers_by_tag`` takes a tag name (not a ticker), so a 4xx
+        # is "tag not found / bad tag" — a resource lookup failure. Use
+        # ``RobinhoodResourceError`` as the fallback (same shape as the
+        # Phase A portfolio/watchlists fallback).
+        #
+        # NOTE on semantics: this method paginates via a list comprehension
+        # over instrument URLs returned by the tag-list call. If any of
+        # those per-instrument ``get_url`` calls 5xx's mid-iteration, the
+        # whole method raises ``RobinhoodServerError`` and NO partial result
+        # is returned. That matches the all-or-nothing contract callers
+        # already rely on (the method signature is a ``List[str]`` — a
+        # half-filled list would silently lose tickers and that's worse
+        # than an explicit error).
+        try:
+            instrument_list = self.get_url(urls.tags(tag))["instruments"]
+            return [self.get_url(instrument)["symbol"] for instrument in instrument_list]
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def all_instruments(self):
         """
         Returns a list of symbols of securities in user's portfolio.
         """
-        positions = self.positions()
-        instruments = []
-        for position in positions["results"]:
-            instruments.append(self.get_url(position["instrument"]))
-        return instruments
+        # Issue #137 Phase B: translate HTTP errors via the shared dispatcher.
+        # ``positions()`` is ALREADY wrapped (Phase A) and raises pyrh
+        # exceptions directly — it will not leak raw ``HTTPError`` here.
+        # This wrapper covers the per-iteration ``get_url(position["instrument"])``
+        # loop inside the method body. Fallback: ``RobinhoodResourceError``
+        # (no user input — a 4xx means Robinhood's own instrument URL is
+        # unreachable, which is a resource lookup failure, not bad input).
+        #
+        # NOTE on semantics: if an instrument fetch 5xx's mid-pagination,
+        # the whole method raises ``RobinhoodServerError`` and NO partial
+        # result is returned. The method signature is a list — a
+        # half-populated list would silently drop positions and that's
+        # worse than an explicit error. Callers that want partial results
+        # should iterate positions themselves.
+        try:
+            positions = self.positions()
+            instruments = []
+            for position in positions["results"]:
+                instruments.append(self.get_url(position["instrument"]))
+            return instruments
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def get_symbol_from_instrument_url(self, url):
         instrument = self.get_url(url)
@@ -1634,6 +1687,14 @@ class Robinhood(InstrumentManager, SessionManager):
 
         TODO: Is there a way to get these from the API endpoint without stepping through
             order history?
+
+        .. note::
+            As of pyrh v3.x, this method may raise :class:`RobinhoodServerError`,
+            :class:`RobinhoodRateLimitError`, or :class:`RobinhoodResourceError`
+            (transitively via :meth:`order_history`) instead of the legacy raw
+            :class:`requests.HTTPError`. Callers relying on ``except
+            requests.HTTPError`` should update to the richer exception
+            hierarchy. See investment-system-docs issue #138.
         """
 
         open_orders = []
