@@ -284,6 +284,25 @@ EXEMPT_UNWRAPPED_GET_URL_METHODS = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Surface-scan AST helpers.
+#
+# #144 tightened the previous inline ``_inside_try`` (any ast.Try ancestor)
+# into ``_inside_try_with_dispatcher`` (nearest enclosing Try's handlers
+# must invoke ``_raise_for_http_error``). Round 2 (#144 extension, same
+# PR) extracted those helpers to ``tests/_ast_guard_helpers.py`` so the
+# POST-path guard in ``test_robinhood_post_path_order_submission_http_error_mapping.py``
+# can share the same tightened implementation. The re-exports below keep
+# the in-module ergonomics for the #144 boundary-case tests unchanged.
+# ---------------------------------------------------------------------------
+
+from tests._ast_guard_helpers import (  # noqa: E402
+    _handler_calls_dispatcher,
+    _inside_try_with_dispatcher,
+    _is_self_get_url_call,
+)
+
+
 def test_no_unwrapped_get_url_call_sites_on_robinhood_class():
     """Surface scan: no ``Robinhood`` method may call ``self.get_url(...)``
     outside a ``try`` block unless explicitly allowlisted.
@@ -316,59 +335,22 @@ def test_no_unwrapped_get_url_call_sites_on_robinhood_class():
     )
     assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
 
-    def _is_self_get_url_call(node: ast.AST) -> bool:
-        """True iff ``node`` is ``self.get_url(...)``."""
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        if not isinstance(func, ast.Attribute):
-            return False
-        if func.attr != "get_url":
-            return False
-        value = func.value
-        if not isinstance(value, ast.Name):
-            return False
-        return value.id == "self"
-
-    def _inside_try(method: ast.FunctionDef, target: ast.Call) -> bool:
-        """True iff ``target`` is a descendant of some ``ast.Try`` node
-        whose ``try`` body lives inside ``method``."""
-        for node in ast.walk(method):
-            if isinstance(node, ast.Try):
-                # Walk each Try's body + handlers + else + finalbody; if
-                # target is among those descendants, it's inside a try.
-                for child in ast.walk(node):
-                    if child is target:
-                        return True
-        return False
-
-    def _has_direct_dispatcher_call(method: ast.FunctionDef) -> bool:
-        """True iff method body directly invokes ``_raise_for_http_error``.
-
-        Defensive: a method could conceivably dispatch manually (no try
-        block, but explicit call to the helper). None of the current
-        methods do this, but the Phase-A guard allows it, so mirror that.
-        """
-        for node in ast.walk(method):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == "_raise_for_http_error":
-                    return True
-        return False
-
+    # #144: route through the module-level tightened helper. The previous
+    # inline ``_inside_try`` returned True for any ast.Try ancestor,
+    # which let through try/except blocks whose handler did NOT invoke
+    # ``_raise_for_http_error`` (e.g. the pre-PR #13 shape of
+    # ``cancel_order``). ``_inside_try_with_dispatcher`` requires the
+    # enclosing try's except handlers to dispatch.
     offenders = []  # list of (method_name, line_no)
     for method in ast.walk(robinhood_class):
         if not isinstance(method, ast.FunctionDef):
             continue
         if method.name in EXEMPT_UNWRAPPED_GET_URL_METHODS:
             continue
-        has_dispatcher = _has_direct_dispatcher_call(method)
         for node in ast.walk(method):
             if not _is_self_get_url_call(node):
                 continue
-            if _inside_try(method, node):
-                continue
-            if has_dispatcher:
-                # Method dispatches manually somewhere — trust it.
+            if _inside_try_with_dispatcher(method, node):
                 continue
             offenders.append((method.name, node.lineno))
 
@@ -386,3 +368,285 @@ def test_no_unwrapped_get_url_call_sites_on_robinhood_class():
             "justification comment explaining why it is intentionally "
             "unwrapped."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #144 — tighten the surface-scan AST guard.
+#
+# The Phase-C surface-scan above uses ``_inside_try`` which only verifies
+# that a ``self.get_url(...)`` call is a descendant of SOME ``ast.Try``
+# node in the method. It does NOT verify that the matching except handler
+# actually invokes ``_raise_for_http_error``. That is the same-shape
+# weakness as #136: a method that does
+#
+#     try:
+#         self.get_url(...)
+#     except requests.HTTPError:
+#         raise ValueError("bad")
+#
+# passes the loose guard silently, even though it does NOT dispatch via
+# the shared helper. ``cancel_order`` at ``robinhood.py:1729`` / ``:1759``
+# was exactly this shape before PR #13 (#148) wrapped it.
+#
+# These tests pin the TIGHT semantic: the guard must verify at least one
+# except handler in the enclosing try calls ``_raise_for_http_error``.
+# ---------------------------------------------------------------------------
+
+
+def _parse_single_method(source):
+    """Parse ``source`` (a def statement) and return the FunctionDef + the
+    single ``self.get_url(...)`` call inside it.
+
+    Used by the #144 tightening tests to build small, readable fixtures.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(source))
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+
+    def _is_self_get_url_call(node):
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return False
+        if func.attr != "get_url":
+            return False
+        value = func.value
+        return isinstance(value, ast.Name) and value.id == "self"
+
+    calls = [n for n in ast.walk(method) if _is_self_get_url_call(n)]
+    assert calls, f"Fixture must contain self.get_url(...): {source!r}"
+    return method, calls
+
+
+def test_inside_try_with_dispatcher_flags_try_except_that_raises_unrelated_exc():
+    """RED for #144: the tight guard must return False for a method that
+    wraps ``self.get_url(...)`` in ``try/except HTTPError: raise ValueError(...)``
+    — there is no ``_raise_for_http_error`` in the except handler, so the
+    call is effectively unwrapped.
+
+    This is the exact shape of ``cancel_order`` pre-PR #13 (#148); the
+    loose ``_inside_try`` would have let it through silently.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def cancel_order_like(self, order_id):
+            try:
+                return self.get_url(order_id)
+            except requests.exceptions.HTTPError:
+                raise ValueError("bad order id")
+        """
+    )
+
+    # Tight semantic: try exists and wraps the call, but the except handler
+    # does not dispatch via ``_raise_for_http_error`` -> NOT covered.
+    assert _inside_try_with_dispatcher(method, calls[0]) is False
+
+
+def test_inside_try_with_dispatcher_accepts_proper_dispatcher_wrap():
+    """GREEN invariant for #144: a method that wraps ``self.get_url(...)``
+    in ``try/except HTTPError`` and calls ``_raise_for_http_error`` in
+    the except handler must be accepted.
+
+    This is the shape of every Phase-A / Phase-B / Phase-C wrapped method
+    (e.g. ``portfolio``, ``user``, ``get_stock_marketdata``).
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def portfolio_like(self):
+            try:
+                return self.get_url(urls.PORTFOLIOS)
+            except requests.exceptions.HTTPError as e:
+                _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is True
+
+
+def test_inside_try_with_dispatcher_rejects_bare_try_no_handler_dispatch():
+    """Edge case: ``try/except Exception: pass`` — no dispatcher call
+    anywhere in the handler. Tight guard must reject.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def silent_swallow(self):
+            try:
+                return self.get_url("/x")
+            except Exception:
+                pass
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is False
+
+
+def test_inside_try_with_dispatcher_handles_multiple_tries_only_one_dispatches():
+    """Boundary case: method with two independent ``try`` blocks; only
+    the one containing the ``get_url`` call is relevant. Tight guard must
+    focus on the enclosing try, not any sibling try.
+
+    Here the ENCLOSING try does dispatch -> True.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def two_tries_enclosing_dispatches(self):
+            try:
+                something_unrelated()
+            except Exception:
+                pass
+            try:
+                return self.get_url("/x")
+            except requests.exceptions.HTTPError as e:
+                _raise_for_http_error(e)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is True
+
+
+def test_inside_try_with_dispatcher_handles_multiple_tries_enclosing_does_not_dispatch():
+    """Boundary case (inverse): the ``get_url`` call is inside a try that
+    does NOT dispatch, even though a sibling try DOES dispatch.
+
+    A loose guard that looked at any try in the method would pass this
+    (wrong); the tight guard must reject.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def two_tries_enclosing_does_not_dispatch(self):
+            try:
+                return self.get_url("/x")
+            except requests.exceptions.HTTPError:
+                raise ValueError("bad")
+            try:
+                something_else()
+            except requests.exceptions.HTTPError as e:
+                _raise_for_http_error(e)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is False
+
+
+def test_inside_try_with_dispatcher_handles_nested_try_outer_dispatches():
+    """Nested try/except: outer dispatches, inner doesn't. The call is
+    inside BOTH. Tight guard should accept because some enclosing try
+    dispatches.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def nested_outer_dispatches(self):
+            try:
+                try:
+                    return self.get_url("/x")
+                except KeyError:
+                    pass
+            except requests.exceptions.HTTPError as e:
+                _raise_for_http_error(e)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is True
+
+
+def test_inside_try_with_dispatcher_accepts_dispatcher_via_attribute_form():
+    """Tolerate ``self._raise_for_http_error(...)`` or module-prefixed
+    forms if such usage ever appears. Today callers use the bare-name
+    module-scope function, but the helper should not be brittle to a
+    qualified reference that resolves to the same symbol.
+    """
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+    )
+
+    method, calls = _parse_single_method(
+        """
+        def dispatch_via_module_prefix(self):
+            try:
+                return self.get_url("/x")
+            except requests.exceptions.HTTPError as e:
+                pyrh.robinhood._raise_for_http_error(e)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is True
+
+
+def test_tightened_guard_passes_on_real_robinhood_module():
+    """Integration: the tightened surface-scan must still pass on master
+    (PR #13 merged, cancel_order wrapped). Re-exercising the top-level
+    guard with the tight helper asserts no regression on real code.
+
+    This test duplicates the top-level scan using the module-level helpers
+    to keep the invariant explicit, and will fail immediately if the
+    tightening accidentally flags a method that the loose version let
+    through but that IS properly wrapped.
+    """
+    import ast
+    from pathlib import Path
+
+    from tests.test_robinhood_phase_c_and_142_http_error_mapping import (
+        _inside_try_with_dispatcher,
+        _is_self_get_url_call,
+    )
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+    tree = ast.parse(source)
+    robinhood_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Robinhood"
+    )
+
+    offenders = []
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
+            continue
+        if method.name in EXEMPT_UNWRAPPED_GET_URL_METHODS:
+            continue
+        for node in ast.walk(method):
+            if not _is_self_get_url_call(node):
+                continue
+            if _inside_try_with_dispatcher(method, node):
+                continue
+            offenders.append((method.name, node.lineno))
+
+    assert offenders == [], (
+        "Tightened guard flagged methods that the loose guard let pass. "
+        "Each entry below indicates a method that calls self.get_url(...) "
+        "inside a try block whose handler does NOT invoke "
+        "_raise_for_http_error -- i.e., unwrapped dispatch:\n"
+        + "\n".join(f"  - {name} at line {lineno}" for name, lineno in offenders)
+    )

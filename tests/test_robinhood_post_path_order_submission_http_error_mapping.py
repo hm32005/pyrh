@@ -301,15 +301,29 @@ EXEMPT_UNWRAPPED_POST_METHODS: frozenset = frozenset()
 
 def test_no_unwrapped_self_post_call_sites_on_robinhood_class():
     """Surface scan: no ``Robinhood`` method may call ``self.post(...)``
-    outside a ``try`` block unless explicitly allowlisted.
+    outside a ``try`` block whose handler dispatches via
+    ``_raise_for_http_error`` unless explicitly allowlisted.
 
     Twin of ``test_no_unwrapped_get_url_call_sites_on_robinhood_class``
     from the #142/#144 surface-scan guard, extended to the write path.
     Every ``self.post(...)`` call site must live inside a ``try`` block
-    whose handler dispatches via ``_raise_for_http_error(...,
-    fallback_exc=RobinhoodOrderSubmissionError)`` OR the method name must
-    be added to ``EXEMPT_UNWRAPPED_POST_METHODS`` with a justification.
+    whose handler invokes ``_raise_for_http_error(...,
+    fallback_exc=RobinhoodOrderSubmissionError)`` OR the method name
+    must be added to ``EXEMPT_UNWRAPPED_POST_METHODS`` with a
+    justification.
+
+    Issue #144 round-2 tightened this from the loose ``_inside_try +
+    has_dispatcher`` shape (originally introduced in PR #14 / #147)
+    to the same ``_inside_try_with_dispatcher`` semantic used by the
+    ``get_url`` guard — the enclosing try's handler must actually
+    dispatch, not merely exist. Helpers now live in
+    ``tests/_ast_guard_helpers.py`` and are shared across both guards.
     """
+    from tests._ast_guard_helpers import (
+        _inside_try_with_dispatcher,
+        _is_self_post_call,
+    )
+
     source = (
         Path(__file__)
         .resolve()
@@ -328,51 +342,16 @@ def test_no_unwrapped_self_post_call_sites_on_robinhood_class():
     )
     assert robinhood_class is not None, "Robinhood class not found in robinhood.py"
 
-    def _is_self_post_call(node: ast.AST) -> bool:
-        """True iff ``node`` is ``self.post(...)``."""
-        if not isinstance(node, ast.Call):
-            return False
-        func = node.func
-        if not isinstance(func, ast.Attribute):
-            return False
-        if func.attr != "post":
-            return False
-        value = func.value
-        if not isinstance(value, ast.Name):
-            return False
-        return value.id == "self"
-
-    def _inside_try(method: ast.FunctionDef, target: ast.Call) -> bool:
-        """True iff ``target`` is a descendant of some ``ast.Try`` node
-        whose body lives inside ``method``."""
-        for node in ast.walk(method):
-            if isinstance(node, ast.Try):
-                for child in ast.walk(node):
-                    if child is target:
-                        return True
-        return False
-
-    def _has_direct_dispatcher_call(method: ast.FunctionDef) -> bool:
-        """True iff method body directly invokes ``_raise_for_http_error``."""
-        for node in ast.walk(method):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id == "_raise_for_http_error":
-                    return True
-        return False
-
     offenders = []
     for method in ast.walk(robinhood_class):
         if not isinstance(method, ast.FunctionDef):
             continue
         if method.name in EXEMPT_UNWRAPPED_POST_METHODS:
             continue
-        has_dispatcher = _has_direct_dispatcher_call(method)
         for node in ast.walk(method):
             if not _is_self_post_call(node):
                 continue
-            if _inside_try(method, node):
-                continue
-            if has_dispatcher:
+            if _inside_try_with_dispatcher(method, node):
                 continue
             offenders.append((method.name, node.lineno))
 
@@ -382,7 +361,7 @@ def test_no_unwrapped_self_post_call_sites_on_robinhood_class():
         )
         pytest.fail(
             "Unwrapped self.post(...) call sites found on Robinhood class "
-            "(issue #147 POST-path dispatcher):\n"
+            "(issue #147 POST-path dispatcher + #144 round-2 tightening):\n"
             f"{formatted}\n\n"
             "Each call site must either be inside a ``try/except "
             "requests.HTTPError`` block that invokes "
@@ -392,3 +371,417 @@ def test_no_unwrapped_self_post_call_sites_on_robinhood_class():
             "justification comment explaining why it is intentionally "
             "unwrapped."
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #144 / #147 — tighten the POST surface-scan AST guard.
+#
+# PR #14 (#147) landed the POST-path dispatcher and a twin surface-scan
+# guard that reuses the same loose ``_inside_try`` logic as the pre-PR
+# #13 ``get_url`` guard: the guard only verifies that the ``self.post``
+# call is a DESCENDANT of some ``ast.Try`` node, not that the matching
+# except handler actually invokes ``_raise_for_http_error``.
+#
+# The same-shape weakness as #144 (applied to POST): a method that does
+#
+#     try:
+#         self.post(urls.orders(), data=payload)
+#     except requests.HTTPError:
+#         raise ValueError("bad order")
+#
+# passes the loose POST guard silently, even though it does NOT dispatch
+# via the shared helper. Merging PR #15 (#144) without fixing this leaves
+# #144 only half-closed — the GET surface is tight but POST is still loose.
+#
+# These tests pin the TIGHT semantic for POST: the guard must verify at
+# least one except handler in the enclosing try calls
+# ``_raise_for_http_error``. Helpers are imported from
+# ``tests._ast_guard_helpers`` so they share one implementation with the
+# ``get_url`` guard (parameterized on method name).
+# ---------------------------------------------------------------------------
+
+
+def _parse_single_method_with_post(source: str):
+    """Parse a dedented ``def`` source and return ``(FunctionDef, post_call)``.
+
+    Used by the #147 tightening tests to build small, readable fixtures.
+    """
+    import textwrap
+
+    from tests._ast_guard_helpers import _is_self_post_call
+
+    tree = ast.parse(textwrap.dedent(source))
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+    calls = [n for n in ast.walk(method) if _is_self_post_call(n)]
+    assert calls, f"Fixture must contain self.post(...): {source!r}"
+    return method, calls
+
+
+def test_post_guard_rejects_try_except_that_raises_unrelated_exc():
+    """Tight POST guard: flags ``try: self.post(...) except HTTPError:
+    raise ValueError(...)`` — the handler does NOT dispatch, so the POST
+    call is effectively unwrapped. This is the same-shape weakness as
+    pre-PR #13 ``cancel_order`` applied to the POST write path.
+    """
+    from tests._ast_guard_helpers import _inside_try_with_dispatcher
+
+    method, calls = _parse_single_method_with_post(
+        """
+        def submit_buy_order_like(self, payload):
+            try:
+                return self.post(urls.orders(), data=payload)
+            except requests.exceptions.HTTPError:
+                raise ValueError("bad order submission")
+        """
+    )
+
+    # Tight semantic: try exists and wraps the post call, but the except
+    # handler does not dispatch via ``_raise_for_http_error`` -> NOT covered.
+    assert _inside_try_with_dispatcher(method, calls[0]) is False
+
+
+def test_post_guard_accepts_proper_dispatcher_wrap():
+    """Tight POST guard: accepts the exact shape used by the wrapped
+    POST methods (``submit_buy_order``, ``submit_sell_order``,
+    ``place_order``, and the inner retry in ``cancel_order``).
+    """
+    from tests._ast_guard_helpers import _inside_try_with_dispatcher
+
+    method, calls = _parse_single_method_with_post(
+        """
+        def submit_buy_order_like(self, payload):
+            try:
+                return self.post(urls.orders(), data=payload)
+            except requests.exceptions.HTTPError as e:
+                _raise_for_http_error(e, fallback_exc=RobinhoodOrderSubmissionError)
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is True
+
+
+def test_post_guard_cancel_order_nested_retry_shape_documented():
+    """``cancel_order`` POST shape: outer post with retry-on-HTTPError,
+    inner retry dispatcher-wrapped.
+
+    Shape:
+
+        try:
+            res = self.post(order["cancel"])   # OUTER
+            return res
+        except requests.HTTPError:
+            try:
+                res = self.post(order["cancel"])   # INNER (retry)
+                return res
+            except requests.HTTPError as e:
+                _raise_for_http_error(e, fallback_exc=...)
+
+    Current tight-guard semantics (``_handler_calls_dispatcher`` does
+    ``ast.walk(handler)``) classify BOTH posts as dispatcher-wrapped,
+    because the outer handler's subtree contains the inner handler's
+    ``_raise_for_http_error`` call. This is a known looseness: a
+    handler that contains a nested try whose handler dispatches is
+    treated as itself dispatching, even though the outer exception
+    path (retry-success or retry-failure-of-a-different-class) does
+    not dispatch the original exception.
+
+    Pinning the current semantics here so the follow-up tightening
+    (tracked under the Phase A/B/discovery/options consolidation, which
+    also addresses the even-weaker ``isinstance(n, ast.Try)`` guards)
+    has a reviewer-visible record of what "tight" means today.
+    """
+    from tests._ast_guard_helpers import (
+        _inside_try_with_dispatcher,
+        _is_self_post_call,
+    )
+
+    method, calls = _parse_single_method_with_post(
+        """
+        def cancel_order_like(self, order_id):
+            order = self.get_url(urls.orders(order_id))
+            try:
+                res = self.post(order["cancel"])
+                return res
+            except requests.exceptions.HTTPError:
+                try:
+                    res = self.post(order["cancel"])
+                    return res
+                except requests.exceptions.HTTPError as e:
+                    _raise_for_http_error(e, fallback_exc=RobinhoodOrderSubmissionError)
+        """
+    )
+
+    assert len(calls) == 2
+    outer_post, inner_post = sorted(calls, key=lambda n: n.lineno)
+
+    # Inner post: enclosing try's handler dispatches directly -> ACCEPT.
+    assert _inside_try_with_dispatcher(method, inner_post) is True
+    # Outer post: enclosing try's handler contains a nested try whose
+    # handler dispatches. Current semantics accept this (ast.walk crosses
+    # the nested try boundary). Documented as known looseness — see
+    # follow-up issue for the stricter "handler-own-body-only" rule.
+    assert _inside_try_with_dispatcher(method, outer_post) is True
+
+
+def test_post_guard_rejects_bare_try_no_handler_dispatch():
+    """Edge case: ``try/except Exception: pass`` — silent swallow. Tight
+    guard must reject even though a Try exists.
+    """
+    from tests._ast_guard_helpers import _inside_try_with_dispatcher
+
+    method, calls = _parse_single_method_with_post(
+        """
+        def silent_swallow_post(self, payload):
+            try:
+                return self.post("/x", data=payload)
+            except Exception:
+                pass
+        """
+    )
+
+    assert _inside_try_with_dispatcher(method, calls[0]) is False
+
+
+def test_post_guard_mutation_catches_unwrapped_submit_buy_order():
+    """Mutation test: rewrite the in-memory AST of ``submit_buy_order``
+    to strip its ``_raise_for_http_error`` dispatch (replacing the
+    handler body with ``raise ValueError(...)`` — the pre-#147 shape).
+    The TIGHT guard must flag this as unwrapped; the LOOSE guard used
+    by PR #14 would pass it silently because the call is still a
+    descendant of an ast.Try.
+
+    This proves the extended #144 tightening actually catches the
+    POST-path regression-shape, not merely that it accepts current code.
+    The comparison against the old loose semantic (``_loose_inside_try``
+    defined inline below) is the regression safety net — if someone
+    accidentally routes the POST guard back through the loose helper,
+    this test fails.
+    """
+    from pathlib import Path
+    import textwrap
+
+    from tests._ast_guard_helpers import (
+        _inside_try_with_dispatcher,
+        _is_self_post_call,
+    )
+
+    # Replica of the pre-#144 loose helper for the comparison leg.
+    def _loose_inside_try(method: ast.FunctionDef, target: ast.Call) -> bool:
+        for node in ast.walk(method):
+            if isinstance(node, ast.Try):
+                for child in ast.walk(node):
+                    if child is target:
+                        return True
+        return False
+
+    # Load the real source and find ``submit_buy_order``.
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+    tree = ast.parse(source)
+
+    submit_buy_order = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "submit_buy_order":
+            submit_buy_order = node
+            break
+    assert submit_buy_order is not None, (
+        "submit_buy_order not found on Robinhood class — has it been renamed?"
+    )
+
+    # Sanity: currently the guard PASSES (submit_buy_order is properly wrapped).
+    post_calls = [n for n in ast.walk(submit_buy_order) if _is_self_post_call(n)]
+    assert len(post_calls) == 1, (
+        "submit_buy_order should have exactly one self.post(...) call site"
+    )
+    assert _inside_try_with_dispatcher(submit_buy_order, post_calls[0]) is True, (
+        "baseline: submit_buy_order's post call should be dispatcher-wrapped"
+    )
+
+    # Mutate: replace the except handler body with ``raise ValueError(...)``
+    # (the pre-#147 shape). Find the enclosing Try, rewrite.
+    def _find_enclosing_try(method, call):
+        for try_node in ast.walk(method):
+            if not isinstance(try_node, ast.Try):
+                continue
+            for stmt in try_node.body:
+                for descendant in ast.walk(stmt):
+                    if descendant is call:
+                        return try_node
+        return None
+
+    enclosing_try = _find_enclosing_try(submit_buy_order, post_calls[0])
+    assert enclosing_try is not None, "post call must have an enclosing Try"
+
+    # Replace each handler's body with ``raise ValueError("bad order")`` — a
+    # clear non-dispatching shape.
+    mutant_body = ast.parse(
+        textwrap.dedent(
+            """
+            raise ValueError("bad order")
+            """
+        )
+    ).body
+    for handler in enclosing_try.handlers:
+        handler.body = mutant_body
+
+    # LOOSE guard: the call is still a descendant of an ast.Try, so the
+    # loose helper would pass it silently. This demonstrates the regression
+    # that the tight guard catches.
+    assert _loose_inside_try(submit_buy_order, post_calls[0]) is True, (
+        "loose helper should still see the call as 'inside a try' — "
+        "that is the weakness the tight guard fixes"
+    )
+
+    # TIGHT guard: the mutated handler does not call _raise_for_http_error,
+    # so the call is effectively unwrapped -> guard must REJECT.
+    assert _inside_try_with_dispatcher(submit_buy_order, post_calls[0]) is False, (
+        "tight POST guard must flag submit_buy_order as unwrapped when its "
+        "except handler raises ValueError instead of dispatching"
+    )
+
+
+def test_post_guard_flags_mutated_submit_buy_order_that_drops_dispatcher():
+    """End-to-end guard test: mutate ``submit_buy_order`` in-memory to
+    drop its ``_raise_for_http_error`` call (replaced with
+    ``raise ValueError``), then re-run the surface-scan logic. The
+    guard MUST flag ``submit_buy_order`` as an offender.
+
+    This is the real regression-catching test: it exercises the same
+    code path as the top-level surface scan
+    (``test_no_unwrapped_self_post_call_sites_on_robinhood_class``) on
+    a mutated AST, proving the scan would have caught PR #14's
+    regression shape. Under the LOOSE ``_inside_try`` (any-Try ancestor)
+    this test would not catch the mutation, because the post call is
+    still inside an ast.Try — hence the guard had to be tightened.
+    """
+    from pathlib import Path
+    import textwrap
+
+    from tests._ast_guard_helpers import (
+        _inside_try_with_dispatcher,
+        _is_self_post_call,
+    )
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+    tree = ast.parse(source)
+    robinhood_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Robinhood"
+    )
+
+    submit_buy_order = next(
+        m
+        for m in ast.walk(robinhood_class)
+        if isinstance(m, ast.FunctionDef) and m.name == "submit_buy_order"
+    )
+
+    # Locate the enclosing try wrapping the real post call and mutate
+    # its handler to raise ValueError (pre-#147 shape).
+    post_calls = [n for n in ast.walk(submit_buy_order) if _is_self_post_call(n)]
+    assert len(post_calls) == 1
+
+    def _find_enclosing_try(method, call):
+        for try_node in ast.walk(method):
+            if not isinstance(try_node, ast.Try):
+                continue
+            for stmt in try_node.body:
+                for descendant in ast.walk(stmt):
+                    if descendant is call:
+                        return try_node
+        return None
+
+    enclosing_try = _find_enclosing_try(submit_buy_order, post_calls[0])
+    mutant_body = ast.parse(
+        textwrap.dedent('raise ValueError("bad order")')
+    ).body
+    for handler in enclosing_try.handlers:
+        handler.body = mutant_body
+
+    # Re-run the SAME surface-scan logic as the top-level guard, using
+    # the shared tight helpers. Expect submit_buy_order to surface as
+    # an offender.
+    offenders = []
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
+            continue
+        if method.name in EXEMPT_UNWRAPPED_POST_METHODS:
+            continue
+        for node in ast.walk(method):
+            if not _is_self_post_call(node):
+                continue
+            if _inside_try_with_dispatcher(method, node):
+                continue
+            offenders.append((method.name, node.lineno))
+
+    offender_names = {name for name, _ in offenders}
+    assert "submit_buy_order" in offender_names, (
+        "tight POST guard must flag submit_buy_order after its dispatcher "
+        "call is mutated to a raise ValueError. offenders="
+        f"{sorted(offender_names)}"
+    )
+
+
+def test_post_guard_tight_scan_passes_on_real_module():
+    """Integration: running the tight surface scan on the real
+    ``robinhood.py`` must not flag any method. Every ``self.post(...)``
+    call site is either dispatcher-wrapped directly (``submit_buy_order``,
+    ``submit_sell_order``, ``place_order``, inner ``cancel_order`` retry)
+    or sits in the ``cancel_order`` outer-retry shape documented in
+    ``test_post_guard_cancel_order_nested_retry_shape_documented`` above.
+
+    This test is the POST-path twin of
+    ``test_tightened_guard_passes_on_real_robinhood_module`` in the
+    ``get_url`` guard module. It re-runs the full class scan via the
+    TIGHT helpers so any future method that slips in with the #144
+    loose-try-without-dispatch shape is caught.
+    """
+    from pathlib import Path
+
+    from tests._ast_guard_helpers import (
+        _inside_try_with_dispatcher,
+        _is_self_post_call,
+    )
+
+    source = (
+        Path(__file__)
+        .resolve()
+        .parent.parent.joinpath("pyrh/robinhood.py")
+        .read_text()
+    )
+    tree = ast.parse(source)
+    robinhood_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Robinhood"
+    )
+
+    offenders = []
+    for method in ast.walk(robinhood_class):
+        if not isinstance(method, ast.FunctionDef):
+            continue
+        if method.name in EXEMPT_UNWRAPPED_POST_METHODS:
+            continue
+        for node in ast.walk(method):
+            if not _is_self_post_call(node):
+                continue
+            if _inside_try_with_dispatcher(method, node):
+                continue
+            offenders.append((method.name, node.lineno))
+
+    assert offenders == [], (
+        "Tight POST surface scan flagged methods. Each entry indicates a "
+        "method that calls self.post(...) with no enclosing try whose "
+        "handler dispatches via _raise_for_http_error — i.e. an unwrapped "
+        "POST call site:\n"
+        + "\n".join(f"  - {name} at line {lineno}" for name, lineno in offenders)
+    )
