@@ -48,13 +48,21 @@ Used by 5 guards (consolidation complete as of #141 / #158):
   ``test_all_options_methods_have_http_error_handling`` (#135; tightened
   here in #141 / #158).
 
-Known limitations (out-of-scope, tracked separately):
+Issue #162 nested-try tightening:
 
-* ``_inside_try_with_dispatcher`` uses ``ast.walk(handler)`` to find
-  ``_raise_for_http_error`` — a nested try whose handler swallows the
-  call and raises unrelated would still pass if an OUTER handler
-  contains a ``_raise_for_http_error`` call. This is a narrow blind
-  spot acknowledged in #144 and deferred.
+* ``_handler_calls_dispatcher`` previously used ``ast.walk(handler)`` to
+  find ``_raise_for_http_error`` calls. ``ast.walk`` recurses into every
+  descendant including nested ``ast.Try`` nodes, so an outer ``except``
+  handler that contained a nested try whose INNER handler dispatched was
+  credited with dispatching itself. This was a narrow blind spot
+  acknowledged in #144 and documented in the POST-path guard tests as
+  "known looseness" (``test_post_guard_cancel_order_nested_retry_shape_documented``).
+* Fixed here via a manual walker (``_descendants_call_dispatcher``) that
+  treats ``ast.Try`` subtrees as opaque — a handler is considered to
+  dispatch only if its OWN body (outside of any nested try) contains the
+  call. Consequence: ``cancel_order``'s outer ``self.post(...)`` call
+  site is legitimately flagged by the POST surface scan and now lives
+  in ``EXEMPT_UNWRAPPED_POST_METHODS`` with a full justification block.
 """
 from __future__ import annotations
 
@@ -94,21 +102,63 @@ def _is_self_post_call(node: ast.AST) -> bool:
     return _is_self_method_call(node, "post")
 
 
+def _is_dispatcher_call(node: ast.AST) -> bool:
+    """True iff ``node`` is a call to ``_raise_for_http_error`` (bare-name
+    or attribute form).
+
+    Accepts ``_raise_for_http_error(e)``, ``self._raise_for_http_error(e)``,
+    and ``pyrh.robinhood._raise_for_http_error(e)`` — anything whose call
+    target's trailing segment is ``_raise_for_http_error``.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    fn = node.func
+    if isinstance(fn, ast.Name) and fn.id == "_raise_for_http_error":
+        return True
+    if isinstance(fn, ast.Attribute) and fn.attr == "_raise_for_http_error":
+        return True
+    return False
+
+
+def _descendants_call_dispatcher(node: ast.AST) -> bool:
+    """True iff ``node`` or any non-nested-Try descendant is a dispatcher call.
+
+    Manual walker that treats ``ast.Try`` subtrees as opaque — crossing a
+    nested try boundary would credit the outer handler with the inner
+    handler's dispatcher call, which is exactly the #162 bug. The outer
+    handler's direct body (statements around any nested try, bodies of
+    ``if`` / ``for`` / ``with`` inside the handler, etc.) is still walked
+    normally; only ``ast.Try`` children are treated as opaque regions that
+    have their OWN handlers.
+    """
+    if _is_dispatcher_call(node):
+        return True
+    if isinstance(node, ast.Try):
+        # Opaque: nested try has its own handlers. The outer handler
+        # doesn't get credit for what a nested try's handler dispatches.
+        return False
+    for child in ast.iter_child_nodes(node):
+        if _descendants_call_dispatcher(child):
+            return True
+    return False
+
+
 def _handler_calls_dispatcher(handler: ast.ExceptHandler) -> bool:
     """True iff ``except`` handler body invokes ``_raise_for_http_error``.
+
+    Issue #162 tightening: does NOT recurse into nested ``ast.Try`` subtrees.
+    A handler counts as dispatching only if its OWN body (outside of any
+    nested try/except) contains the call — ``if`` / ``for`` / ``with`` / ``while``
+    statements inside the handler are walked normally, but nested try/except
+    is opaque (it has its own handlers).
 
     Accepts both bare-name (``_raise_for_http_error(e)``) and attribute
     forms (``self._raise_for_http_error(e)`` /
     ``pyrh.robinhood._raise_for_http_error(e)``) — anything whose
     call target's trailing segment is ``_raise_for_http_error``.
     """
-    for node in ast.walk(handler):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        if isinstance(fn, ast.Name) and fn.id == "_raise_for_http_error":
-            return True
-        if isinstance(fn, ast.Attribute) and fn.attr == "_raise_for_http_error":
+    for stmt in handler.body:
+        if _descendants_call_dispatcher(stmt):
             return True
     return False
 

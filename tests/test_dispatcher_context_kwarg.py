@@ -163,6 +163,33 @@ def test_dispatcher_context_kwarg_multi_field():
     assert "quantity=10" in msg
 
 
+def test_dispatcher_context_kwarg_multi_field_exact_order():
+    """Pin dict-insertion-order convention end-to-end.
+
+    Issue #161: the contract is "context rendered in insertion order
+    (``k1=v1, k2=v2, ...``)". The existing substring assertions
+    (``"ticker=AAPL" in msg``) pass regardless of ordering — a future
+    refactor that sorts keys alphabetically or stringifies via
+    ``repr(dict)`` would pass them silently, losing the stable shape
+    callers rely on for greppable log lines.
+
+    This test pins the exact rendered fragment so silent drift
+    (alphabetic sort, ``repr()`` dump, ``json.dumps``) trips a failure.
+    """
+    err = _http_error(404)
+    with pytest.raises(InvalidTickerSymbol) as exc_info:
+        _raise_for_http_error(
+            err,
+            fallback_exc=InvalidTickerSymbol,
+            context={"ticker": "AAPL", "side": "buy", "quantity": 10},
+        )
+    msg = str(exc_info.value)
+    assert "(ticker=AAPL, side=buy, quantity=10)" in msg, (
+        f"Expected exact insertion-ordered fragment "
+        f"'(ticker=AAPL, side=buy, quantity=10)' in message, got: {msg!r}"
+    )
+
+
 def test_dispatcher_empty_context_dict_treated_as_no_context():
     """An empty context dict must not leak ``()`` into the message."""
     err = _http_error(404)
@@ -171,6 +198,26 @@ def test_dispatcher_empty_context_dict_treated_as_no_context():
             err, fallback_exc=RobinhoodResourceError, context={}
         )
     assert "()" not in str(exc_info.value)
+
+
+def test_format_context_none_and_empty_dict_equivalent():
+    """``_format_context(None)`` and ``_format_context({})`` must both
+    return ``""`` (byte-identical).
+
+    Issue #161: the dispatcher BC branch hinges on ``_format_context``
+    returning a falsy value for both "no context" cases — callers that
+    explicitly pass ``context={}`` (e.g. when building a context
+    programmatically and no fields applied) must get the same legacy
+    message as callers that omit the kwarg entirely. Pinning the
+    contract directly on the helper is more precise than relying on
+    downstream ``"()" not in msg`` checks, which only catches one
+    failure mode (stray parentheses).
+    """
+    from pyrh.robinhood import _format_context
+
+    assert _format_context(None) == ""
+    assert _format_context({}) == ""
+    assert _format_context(None) == _format_context({})
 
 
 # ---------------------------------------------------------------------------
