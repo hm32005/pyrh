@@ -796,7 +796,13 @@ class Robinhood(InstrumentManager, SessionManager):
                 )["results"]
             ]
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: surface stock + option_type + expiration filter so
+            # operators can reproduce the failing options-chain lookup.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"stock": stock, "option_type": option_type},
+            )
 
     def get_option_market_data(self, option_id):
         """Gets a list of market data for a given option_id.
@@ -815,7 +821,12 @@ class Robinhood(InstrumentManager, SessionManager):
             # dispatcher now routes 5xx -> RobinhoodServerError and 429 ->
             # RobinhoodRateLimitError while preserving the legacy
             # InvalidOptionId mapping for the 4xx-not-429 branch.
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread option_id into the message.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"option_id": option_id},
+            )
 
     def options_owned(self):
         # Issue #135: translate 5xx/429 on the options-positions endpoint to
@@ -828,7 +839,13 @@ class Robinhood(InstrumentManager, SessionManager):
             options = options["results"]
             return options
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: no per-call input (session-scoped); mark the
+            # resource so logs remain greppable.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"resource": "options_owned"},
+            )
 
     def get_option_marketdata(self, option_id):
         # Issue #135: sibling of ``get_option_market_data`` (fixed in #125).
@@ -839,7 +856,12 @@ class Robinhood(InstrumentManager, SessionManager):
             )
             return info
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread option_id into the message.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"option_id": option_id},
+            )
 
     def get_option_chain_id(self, symbol):
         # Issue #135: two ``get_url`` calls — instrument lookup and chain
@@ -859,7 +881,13 @@ class Robinhood(InstrumentManager, SessionManager):
 
             return chain_id
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: thread the symbol so operators can identify the
+            # failing chain lookup.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={"symbol": symbol},
+            )
 
     def get_option_quote(self, symbol, strike, expiry, otype, state="active"):
         url = urls.OPTIONS_BASE.join(URL("instruments/"))
@@ -878,7 +906,18 @@ class Robinhood(InstrumentManager, SessionManager):
             # symbol, strike, expiry, otype should uniquely define an option
             results = self.get_url(url.with_query(**params)).get("results")
         except requests.exceptions.HTTPError as e:
-            _raise_for_http_error(e, fallback_exc=InvalidOptionId)
+            # Issue #150: surface the 4-tuple that uniquely identifies the
+            # failing option.
+            _raise_for_http_error(
+                e,
+                fallback_exc=InvalidOptionId,
+                context={
+                    "symbol": symbol,
+                    "strike": strike,
+                    "expiry": expiry,
+                    "otype": otype,
+                },
+            )
         if not results:
             return
         else:
