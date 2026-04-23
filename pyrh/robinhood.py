@@ -117,11 +117,23 @@ class Robinhood(InstrumentManager, SessionManager):
     ###########################################################################
 
     def user(self):
-        return self.get_url(urls.USER)
+        # Issue #137 Phase C: profile endpoint — no ticker input, so a 4xx
+        # means the authenticated user's profile resource is unavailable
+        # (``RobinhoodResourceError``), not a bad ticker.
+        try:
+            return self.get_url(urls.USER)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def investment_profile(self):
         """Fetch investment_profile."""
-        return self.get_url(urls.INVESTMENT_PROFILE)
+        # Surfaced by the surface-scan AST guard (issue #144). Profile
+        # endpoint, no ticker input — ``RobinhoodResourceError`` matches
+        # the Phase C fallback rationale.
+        try:
+            return self.get_url(urls.INVESTMENT_PROFILE)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def quote_data(self, stock=""):
         """Fetch stock quote.
@@ -215,7 +227,14 @@ class Robinhood(InstrumentManager, SessionManager):
         # Delegate URL construction to ``urls.market_data_quotes`` so yarl
         # builds the query string correctly; the previous inline form was
         # broken (path segments containing ``?`` + unreturned value).
-        info = self.get_url(urls.market_data_quotes(instruments))
+        #
+        # Issue #142: callers pass ticker-derived instruments, so a 4xx
+        # maps to the legacy "bad ticker" signal (``InvalidTickerSymbol``)
+        # while 5xx / 429 surface as the real server / rate-limit errors.
+        try:
+            info = self.get_url(urls.market_data_quotes(instruments))
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e)
         return info["results"]
 
     def get_historical_quotes(self, stock, interval, span, bounds=Bounds.REGULAR):
@@ -252,7 +271,13 @@ class Robinhood(InstrumentManager, SessionManager):
             ]
         )
 
-        return self.get_url(historicals)
+        # Issue #142: ticker-input endpoint — 4xx keeps the legacy "bad
+        # ticker" signal (``InvalidTickerSymbol``) while 5xx / 429 surface
+        # as server / rate-limit errors instead of leaking raw HTTPError.
+        try:
+            return self.get_url(historicals)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e)
 
     def get_news(self, stock):
         """Fetch news endpoint.
@@ -535,7 +560,13 @@ class Robinhood(InstrumentManager, SessionManager):
 
         """
 
-        res = self.get_url(urls.ACCOUNTS)
+        # Issue #137 Phase C: account / profile endpoint — no ticker
+        # input, so a 4xx means the authenticated user's account resource
+        # is unavailable (``RobinhoodResourceError``), not a bad ticker.
+        try:
+            res = self.get_url(urls.ACCOUNTS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
         return res["results"][0]
 
@@ -634,7 +665,15 @@ class Robinhood(InstrumentManager, SessionManager):
             _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
 
     def get_symbol_from_instrument_url(self, url):
-        instrument = self.get_url(url)
+        # Surfaced by the surface-scan AST guard (issue #144). Takes an
+        # instrument URL (resource identifier, not a ticker) — 4xx means
+        # the instrument resource is unavailable, so
+        # ``RobinhoodResourceError`` matches the Phase A / Phase C
+        # fallback pattern for non-ticker resource lookups.
+        try:
+            instrument = self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(e, fallback_exc=RobinhoodResourceError)
         return instrument["symbol"]
 
     ###########################################################################
