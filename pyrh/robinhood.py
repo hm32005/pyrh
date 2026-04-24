@@ -674,9 +674,14 @@ class Robinhood(InstrumentManager, SessionManager):
         # ``get_url(urls.instruments(...))`` call sites.
         try:
             stock_instrument = self.get_url(self.quote_data(stock)["instrument"])["id"]
-            return self.get_url(urls.instruments(stock_instrument, "popularity"))[
-                "num_open_positions"
-            ]
+            # Issue #182: the previous call ``urls.instruments(stock_instrument,
+            # "popularity")`` relied on positional args, which mapped
+            # ``stock_instrument -> symbol=`` and the literal string
+            # ``"popularity" -> query=``. The resulting URL was
+            # ``/instruments/?symbol=<id>`` — wrong shape entirely. The
+            # popularity endpoint is ``/instruments/<id>/popularity/``.
+            popularity_url = urls.instruments(id_=stock_instrument) / "popularity/"
+            return self.get_url(popularity_url)["num_open_positions"]
         except requests.exceptions.HTTPError as e:
             # Issue #150: surface the ticker so logs can pinpoint the
             # failing popularity lookup.

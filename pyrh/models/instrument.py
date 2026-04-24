@@ -107,16 +107,25 @@ class InstrumentManager(SessionManager):
 
         Args:
             query: If the query argument is provided, the returned values will be
-                restricted to instruments that match the query keyword (single word)
+                restricted to instruments that match the query keyword (single word).
+                When omitted, fetches the unfiltered ``/instruments/`` listing.
 
         Returns:
             A generator of Instruments.
 
+        Note:
+            Issue #182: the previous implementation had the branches inverted
+            -- it returned ``INSTRUMENTS_BASE`` when a query *was* supplied
+            (silently dropping the user's query) and called
+            ``urls.instruments(query=None)`` when no query was supplied (which,
+            after the #78 tightening, raises ``ValueError``). Both arms are
+            now correct.
+
         """
         url = (
-            urls.INSTRUMENTS_BASE
+            urls.instruments(query=query)
             if query is not None
-            else urls.instruments(query=query)
+            else urls.INSTRUMENTS_BASE
         )
         return base_paginator(url, self, InstrumentPaginatorSchema())
 
