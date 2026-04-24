@@ -13,6 +13,7 @@ from pyrh import urls
 from pyrh.exceptions import (
     InvalidOptionId,
     InvalidTickerSymbol,
+    RobinhoodAuthError,
     RobinhoodOrderSubmissionError,
     RobinhoodRateLimitError,
     RobinhoodResourceError,
@@ -81,6 +82,7 @@ def _raise_for_http_error(
     Dispatch:
         * 5xx              -> ``RobinhoodServerError``
         * 429              -> ``RobinhoodRateLimitError`` (with ``Retry-After``)
+        * 401 / 403        -> ``RobinhoodAuthError`` (re-login prompt signal — #140)
         * any other 4xx    -> ``fallback_exc()`` (unchanged per-caller behaviour)
         * no ``.response`` -> ``fallback_exc()`` (defensive fallback)
 
@@ -124,6 +126,13 @@ def _raise_for_http_error(
         raise RobinhoodRateLimitError(
             retry_after=retry_after, context_str=context_str
         ) from None
+    # Issue #140: 401 / 403 get their own class so callers can distinguish
+    # "auth token expired — prompt re-login" from "resource not found".
+    # Checked BEFORE the per-caller fallback so EVERY dispatcher-routed
+    # method (quote, options, portfolio, order, etc.) benefits — not just
+    # the ones that happen to pass ``InvalidTickerSymbol`` as fallback.
+    if status_code in (401, 403):
+        raise RobinhoodAuthError(status_code, context_str) from None
     raise fallback_exc(context_str) from None
 
 

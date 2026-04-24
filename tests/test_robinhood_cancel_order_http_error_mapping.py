@@ -113,7 +113,10 @@ def test_cancel_order_5xx_raises_RobinhoodServerError(
 
 
 @pytest.mark.parametrize("branch_label,order_id_input", ORDER_ID_INPUTS)
-@pytest.mark.parametrize("status", [400, 403, 404])
+# Issue #140: 401 / 403 now route to ``RobinhoodAuthError`` in the dispatcher
+# BEFORE the per-caller fallback, so they're covered in a dedicated test
+# below. This parametrize covers only non-auth 4xx codes.
+@pytest.mark.parametrize("status", [400, 404])
 def test_cancel_order_4xx_raises_RobinhoodOrderSubmissionError(
     branch_label, order_id_input, status
 ):
@@ -135,6 +138,30 @@ def test_cancel_order_4xx_raises_RobinhoodOrderSubmissionError(
     # assertion must be revisited — the contract in this PR says callers can
     # no longer rely on ``except ValueError`` to catch cancel-order failures.
     assert not isinstance(exc_info.value, ValueError)
+
+
+@pytest.mark.parametrize("branch_label,order_id_input", ORDER_ID_INPUTS)
+@pytest.mark.parametrize("status", [401, 403])
+def test_cancel_order_401_403_raises_auth_error(
+    branch_label, order_id_input, status
+):
+    """Issue #140: 401 / 403 must raise ``RobinhoodAuthError``, NOT
+    ``RobinhoodOrderSubmissionError`` — callers need to distinguish
+    session-dead (re-login) from order-rejected (fix input).
+    """
+    from pyrh.exceptions import RobinhoodAuthError, RobinhoodOrderSubmissionError
+
+    rh = _fresh_robinhood()
+
+    def fake_get_url(self, *args, **kwargs):
+        raise _http_error(status)
+
+    with patch("pyrh.robinhood.Robinhood.get_url", fake_get_url):
+        with pytest.raises(RobinhoodAuthError) as exc_info:
+            _invoke_cancel_order(rh, order_id_input)
+
+    assert not isinstance(exc_info.value, RobinhoodOrderSubmissionError)
+    assert str(status) in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

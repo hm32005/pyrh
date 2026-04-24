@@ -229,12 +229,13 @@ def test_post_methods_5xx_raises_RobinhoodServerError(site_label, invoke, status
 
 
 # ---------------------------------------------------------------------------
-# 4xx  ->  RobinhoodOrderSubmissionError    (3 statuses x 5 sites = 15 cases)
+# 4xx  ->  RobinhoodOrderSubmissionError    (2 non-auth statuses x 5 sites = 10)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("site_label,invoke", POST_SITES)
-@pytest.mark.parametrize("status", [400, 403, 404])
+# Issue #140: 401 / 403 route to ``RobinhoodAuthError`` now; covered below.
+@pytest.mark.parametrize("status", [400, 404])
 def test_post_methods_4xx_raises_RobinhoodOrderSubmissionError(
     site_label, invoke, status
 ):
@@ -248,6 +249,24 @@ def test_post_methods_4xx_raises_RobinhoodOrderSubmissionError(
     # Must NOT be plain ValueError — that's the legacy contract this PR
     # breaks (for cancel_order POST sites) and establishes (for submit/place).
     assert not isinstance(exc_info.value, ValueError)
+
+
+@pytest.mark.parametrize("site_label,invoke", POST_SITES)
+@pytest.mark.parametrize("status", [401, 403])
+def test_post_methods_401_403_raises_auth_error(site_label, invoke, status):
+    """Issue #140: 401 / 403 on POST-path order methods raise
+    ``RobinhoodAuthError``, NOT ``RobinhoodOrderSubmissionError`` —
+    distinguishes session-dead from order-rejected.
+    """
+    from pyrh.exceptions import RobinhoodAuthError, RobinhoodOrderSubmissionError
+
+    rh = _fresh_robinhood()
+
+    with pytest.raises(RobinhoodAuthError) as exc_info:
+        invoke(rh, _http_error(status))
+
+    assert not isinstance(exc_info.value, RobinhoodOrderSubmissionError)
+    assert str(status) in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

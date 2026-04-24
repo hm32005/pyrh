@@ -48,7 +48,25 @@ def _with_context(base_message: str, context: str) -> str:
     return base_message
 
 
-class InvalidTickerSymbol(PyrhException):
+class RobinhoodHttpError(PyrhException):
+    """Base class for every exception translated from an HTTP error.
+
+    Issue #139: introduced so callers can write a single
+    ``except RobinhoodHttpError`` to handle ALL HTTP-origin failures
+    (``RobinhoodServerError``, ``RobinhoodRateLimitError``,
+    ``RobinhoodAuthError``, ``RobinhoodResourceError``,
+    ``InvalidTickerSymbol``, ``InvalidOptionId``,
+    ``RobinhoodOrderSubmissionError``) without listing every subclass AND
+    without the over-broad ``except PyrhException`` (which catches
+    unrelated errors like ``InvalidCacheFile`` or ``AuthenticationError``
+    from the login flow).
+
+    BC invariant: still inherits from ``PyrhException`` — existing
+    ``except PyrhException`` callers keep working.
+    """
+
+
+class InvalidTickerSymbol(RobinhoodHttpError):
     """When an invalid ticker (stock symbol) is given.
 
     Issue #150: accepts an optional positional ``context_str`` so the
@@ -56,6 +74,10 @@ class InvalidTickerSymbol(PyrhException):
     the 4xx in the exception message. When no context is passed the argument
     list is empty — identical to the pre-#150 constructor signature
     (``.args == ()`` and ``str(exc) == ""``).
+
+    Issue #139: now inherits from ``RobinhoodHttpError`` (which still
+    inherits from ``PyrhException``) so callers can ``except
+    RobinhoodHttpError`` to catch any HTTP-origin failure.
     """
 
     def __init__(self, context_str: str = "") -> None:
@@ -71,11 +93,13 @@ class InvalidTickerSymbol(PyrhException):
             super().__init__()
 
 
-class InvalidOptionId(PyrhException):
+class InvalidOptionId(RobinhoodHttpError):
     """When an invalid option id is given.
 
     Issue #150: accepts an optional positional ``context_str``. See
     ``InvalidTickerSymbol`` for rationale / BC invariant.
+
+    Issue #139: inherits from ``RobinhoodHttpError``.
     """
 
     def __init__(self, context_str: str = "") -> None:
@@ -87,7 +111,7 @@ class InvalidOptionId(PyrhException):
             super().__init__()
 
 
-class RobinhoodServerError(PyrhException):
+class RobinhoodServerError(RobinhoodHttpError):
     """Robinhood backend returned a 5xx status (outage / upstream error).
 
     Raised instead of ``InvalidTickerSymbol`` when the HTTP response carries a
@@ -117,7 +141,7 @@ class RobinhoodServerError(PyrhException):
         super().__init__(message)
 
 
-class RobinhoodResourceError(PyrhException):
+class RobinhoodResourceError(RobinhoodHttpError):
     """Robinhood returned a 4xx status on a user-resource endpoint.
 
     Raised on trading / portfolio / watchlist endpoints where the legacy
@@ -146,7 +170,7 @@ class RobinhoodResourceError(PyrhException):
             super().__init__()
 
 
-class RobinhoodOrderSubmissionError(PyrhException):
+class RobinhoodOrderSubmissionError(RobinhoodHttpError):
     """4xx errors during order submission, modification, or cancellation.
 
     Introduced by investment-system-docs issue #148 to replace the legacy
@@ -188,7 +212,7 @@ class RobinhoodOrderSubmissionError(PyrhException):
             super().__init__()
 
 
-class RobinhoodRateLimitError(PyrhException):
+class RobinhoodRateLimitError(RobinhoodHttpError):
     """Robinhood returned HTTP 429 (rate-limited).
 
     Distinct from ``InvalidTickerSymbol`` — the user's input is fine; the
@@ -214,5 +238,38 @@ class RobinhoodRateLimitError(PyrhException):
                 f" (retry after {retry_after}s)" if retry_after is not None else ""
             )
             base = f"Robinhood rate limit hit (HTTP 429){hint}."
+            message = _with_context(base, context_str)
+        super().__init__(message)
+
+
+class RobinhoodAuthError(RobinhoodHttpError):
+    """Robinhood returned HTTP 401 or 403 — auth token expired / revoked / forbidden.
+
+    Issue #140: split off from the per-caller 4xx ``fallback_exc`` so callers
+    can distinguish auth-token-expired failures (warrant a re-login prompt)
+    from genuinely-absent resources (``InvalidTickerSymbol`` /
+    ``InvalidOptionId`` / ``RobinhoodResourceError``). A 401 during
+    ``order_history`` is urgent (session is dead); a 404 for a given
+    ``order_id`` is just "unknown id — check the input".
+
+    Signature mirrors ``RobinhoodServerError``: a mandatory ``status_code``
+    (401 or 403) plus optional ``context_str`` for resource-id surfacing
+    (issue #150 pattern). The default message explicitly mentions
+    "re-login may be required" so log readers see the actionable hint
+    without having to cross-reference exception classes.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        context_str: str = "",
+        message: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        if message is None:
+            base = (
+                f"Robinhood returned {status_code} — "
+                f"authentication/authorization error, re-login may be required."
+            )
             message = _with_context(base, context_str)
         super().__init__(message)
