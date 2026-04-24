@@ -870,17 +870,33 @@ class Robinhood(InstrumentManager, SessionManager):
     #                           GET OPTIONS INFO                              #
     ###########################################################################
 
-    def get_options(self, stock, expiration_dates, option_type):
-        """Get a list (chain) of options contracts belonging to a particular stock
+    #: Safety cap for :py:meth:`get_options` pagination. Robinhood options
+    #: chains are typically 1-3 pages at ~40 contracts/page (AAPL weeklies
+    #: being the high end). A legitimate chain should never exceed this cap;
+    #: hitting it indicates a pathological paginator response (cycle, server
+    #: returning the same ``next`` URL forever). We bail out with whatever
+    #: was collected rather than spinning forever so callers can log + move
+    #: on without a hang.
+    _GET_OPTIONS_PAGINATION_CAP = 100
 
-        Args: stock ticker (str), list of expiration dates to filter on
-            (YYYY-MM-DD), and regardless of whether it is a 'put' or a 'call' option type
-            (str).
+    def get_options(self, stock, expiration_dates, option_type):
+        """Get a list (chain) of options contracts belonging to a particular stock.
+
+        Follows the Robinhood ``next`` pagination cursor until exhausted (up
+        to :py:attr:`_GET_OPTIONS_PAGINATION_CAP` pages), merging results into
+        a single flat list. Previously only page 1 was returned, which
+        silently truncated the chain for high-strike-count tickers (AAPL
+        weekly expirations routinely have 100+ strikes).
+
+        Args:
+            stock: stock ticker (str).
+            expiration_dates: list of expiration dates to filter on (YYYY-MM-DD)
+                or a pre-joined comma-separated string.
+            option_type: ``"call"`` or ``"put"``.
 
         Returns:
-            Options Contracts (List): a list (chain) of contracts for a given \
-            underlying equity instrument
-
+            Options Contracts (List): a list (chain) of contracts for the given \
+            underlying equity instrument, across all pages.
         """
         # Issue #135: wrap the unwrapped ``get_url`` calls (instrument lookup,
         # options-chain discovery, options-list retrieval) in the same
@@ -896,12 +912,28 @@ class Robinhood(InstrumentManager, SessionManager):
             else:
                 _expiration_dates_string = expiration_dates
             chain_id = self.get_url(urls.chain(instrument_id))["results"][0]["id"]
-            return [
-                contract
-                for contract in self.get_url(
-                    urls.options(chain_id, _expiration_dates_string, option_type)
-                )["results"]
-            ]
+
+            # Pagination: follow ``next`` cursor until it's None or we hit
+            # the safety cap. ``get_url`` accepts either a yarl.URL (page 1)
+            # or a plain string (subsequent pages — the server returns a
+            # fully-formed absolute URL in ``next``).
+            contracts = []
+            page_url = urls.options(
+                chain_id, _expiration_dates_string, option_type
+            )
+            pages_fetched = 0
+            while page_url is not None:
+                if pages_fetched >= self._GET_OPTIONS_PAGINATION_CAP:
+                    # Bail out with whatever we collected; do NOT raise —
+                    # callers should still receive the partial chain they
+                    # can work with, and the cap prevents an infinite spin
+                    # on a cyclic paginator response.
+                    break
+                page = self.get_url(page_url)
+                contracts.extend(page.get("results", []))
+                page_url = page.get("next")
+                pages_fetched += 1
+            return contracts
         except requests.exceptions.HTTPError as e:
             # Issue #150: surface stock + option_type + expiration filter so
             # operators can reproduce the failing options-chain lookup.
