@@ -1,7 +1,9 @@
 # coding=utf-8
 """Define Robinhood endpoints."""
 
-from typing import Optional
+import warnings
+from functools import wraps
+from typing import Callable, Optional
 
 from yarl import URL
 
@@ -253,3 +255,51 @@ def market_data_quotes(options_instruments) -> URL:
     return (MARKET_DATA_BASE / "quotes/").with_query(
         instruments=",".join(options_instruments)
     )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases for the ``build_*`` helper names dropped in
+# commit ``1cdb2ac`` (Nov 7 2024, "Harish's tweaks"). Issue #185.
+#
+# Each old name is kept as a thin wrapper that emits a ``DeprecationWarning``
+# and forwards to the new name. This mirrors the ``instrument_URL`` →
+# ``instrument_url`` shim pattern (issue #80) and the
+# ``_raise_for_quote_http_error`` alias in ``pyrh/robinhood.py:196``.
+#
+# NOTE: wrappers are used (not bare-name aliases) so the deprecation warning
+# fires on every call — a bare ``build_challenge = challenge`` would forward
+# correctly but silently, defeating the migration signal the issue asks for.
+# ---------------------------------------------------------------------------
+
+
+def _make_build_alias(old_name: str, new_fn: Callable[..., URL]) -> Callable[..., URL]:
+    """Return a wrapper that warns about the ``build_*`` rename and delegates."""
+
+    @wraps(new_fn)
+    def _alias(*args, **kwargs):
+        warnings.warn(
+            f"{old_name!r} is deprecated; use {new_fn.__name__!r} instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return new_fn(*args, **kwargs)
+
+    _alias.__name__ = old_name
+    _alias.__qualname__ = old_name
+    _alias.__doc__ = (
+        f"DEPRECATED alias for :func:`{new_fn.__name__}`. "
+        f"Use :func:`{new_fn.__name__}` directly — this alias will be "
+        f"removed in a future release."
+    )
+    return _alias
+
+
+build_challenge = _make_build_alias("build_challenge", challenge)
+build_ach = _make_build_alias("build_ach", ach)
+build_orders = _make_build_alias("build_orders", orders)
+build_news = _make_build_alias("build_news", news)
+build_fundamentals = _make_build_alias("build_fundamentals", fundamentals)
+build_tags = _make_build_alias("build_tags", tags)
+build_chain = _make_build_alias("build_chain", chain)
+build_options = _make_build_alias("build_options", options)
+build_market_data = _make_build_alias("build_market_data", market_data)
