@@ -101,20 +101,21 @@ def test_news_fundamentals_tags():
     assert str(urls.tags("top-100")) == f"{API_BASE}/midlands/tags/tag/top-100/"
 
 
-def test_chain_builder_currently_raises_value_error():
-    """Pinning test: `chain()` contains ``URL / "/"`` which yarl rejects as
-    "Appending path '/' starting from slash is forbidden". This is a
-    pre-existing upstream bug flagged by the source-level TODO on the same
-    line; treat it as Acknowledged (deferred) rather than silently broken.
-    Delete this test and re-enable the happy-path assertion once the bug is
-    actually fixed in pyrh.urls.chain().
+def test_chain_builder_embeds_instrument_id_as_query_param():
+    """Issue #77: `chain()` previously used ``URL / "/"`` to force a trailing
+    slash, which yarl rejects with "Appending path '/' starting from slash is
+    forbidden". The fix drops the redundant ``/ "/"`` because
+    ``OPTIONS_CHAIN_BASE`` already ends with ``/``. The resulting URL must
+    embed ``equity_instrument_ids=<id>`` as a query parameter on the
+    ``/options/chains/`` endpoint.
     """
-    import pytest
-
     from pyrh import urls
 
-    with pytest.raises(ValueError, match="Appending path '/'"):
-        urls.chain("abc-id")
+    u = urls.chain("abc-id")
+    assert isinstance(u, URL)
+    assert u.path == "/options/chains/"
+    assert u.query["equity_instrument_ids"] == "abc-id"
+    assert str(u) == f"{API_BASE}/options/chains/?equity_instrument_ids=abc-id"
 
 
 def test_options_builder_has_expected_query_params():
