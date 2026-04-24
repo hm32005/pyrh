@@ -175,19 +175,21 @@ def tags(tag: str) -> URL:
 def chain(instrument_id: str) -> URL:
     """Build the query for a particular options chain.
 
-    # TODO: this isn't best practice
-    # (query construction should be a separate function)
-
     Args:
         instrument_id: The instrument in question.
 
     Returns:
-        A constructed URL for the particular options chain search.
+        A constructed URL for the particular options chain search of the form
+        ``/options/chains/?equity_instrument_ids=<id>``.
 
+    Note:
+        The previous implementation appended ``/ "/"`` to force a trailing
+        slash. yarl rejects that construct with ``ValueError: Appending path
+        '/' starting from slash is forbidden`` (issue #77). ``OPTIONS_CHAIN_BASE``
+        already ends with ``/``, so the redundant append is dropped; the
+        query parameter attaches cleanly via ``with_query``.
     """
-    return (
-        OPTIONS_CHAIN_BASE.with_query(equity_instrument_ids=f"{instrument_id}") / "/"
-    )  # TODO: find out if this trailing slash is required.
+    return OPTIONS_CHAIN_BASE.with_query(equity_instrument_ids=f"{instrument_id}")
 
 
 def options(chain_id: str, dates: str, option_type: str) -> URL:
