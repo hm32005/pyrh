@@ -257,6 +257,34 @@ def market_data_quotes(options_instruments) -> URL:
     )
 
 
+def marketdata_options(instrument_urls) -> URL:
+    """Build a batched market-data options URL.
+
+    The Robinhood market-data options endpoint accepts a comma-separated list
+    of full option instrument URLs in the ``instruments`` query parameter and
+    returns pricing + Greeks + IV for each in a single response. Batching is
+    critical for daily scan performance — fetching pricing for 12,800 contracts
+    one at a time is 12,800 HTTP calls; at 40 URLs per batch it's 320.
+
+    Args:
+        instrument_urls: An iterable of full option instrument URLs (as
+            returned in the ``url`` field of each row from
+            :py:meth:`pyrh.robinhood.Robinhood.get_options`).
+
+    Returns:
+        A URL of the form
+        ``/marketdata/options/?instruments=<url1>,<url2>,...``.
+
+    Note:
+        Sibling of :py:func:`market_data_quotes` — same pattern, different
+        endpoint (``options/`` vs ``quotes/``). Kept separate so the
+        ``instruments`` query construction is explicit and test-pinnable.
+    """
+    return (MARKET_DATA_BASE / "options/").with_query(
+        instruments=",".join(instrument_urls)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatibility aliases for the ``build_*`` helper names dropped in
 # commit ``1cdb2ac`` (Nov 7 2024, "Harish's tweaks"). Issue #185.

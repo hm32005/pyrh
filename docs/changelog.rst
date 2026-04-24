@@ -6,6 +6,29 @@ Changelog
 
 .. towncrier release notes start
 
+Pyrh 2.2.0 (unreleased)
+=======================
+
+Features
+--------
+
+- ``Robinhood.get_option_market_data_batch(instrument_urls, batch_size=40)``:
+  batched options market-data fetch. One ``GET /marketdata/options/`` per
+  batch instead of one per contract. ~40x fewer HTTP calls for daily
+  options scans. Returns pricing + Greeks + IV, preserves input order.
+- ``urls.marketdata_options(instrument_urls)``: URL builder for the batched
+  options market-data endpoint (sibling of ``urls.market_data_quotes``).
+
+Bugfixes
+--------
+
+- ``Robinhood.get_options`` now follows the ``next`` pagination cursor
+  until the chain is exhausted. Previously only page 1 of results was
+  returned — silent data loss for high-strike-count tickers (AAPL weekly
+  expirations routinely exceed a single page). A safety cap of 100 pages
+  prevents infinite loops on pathological paginator responses; callers
+  still receive whatever was collected.
+
 Pyrh 2.1.2 (2023-03-04)
 =======================
 
