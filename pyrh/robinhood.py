@@ -1,6 +1,7 @@
 # coding=utf-8
 """robinhood.py: a collection of utilities for working with Robinhood's Private API."""
 
+import warnings
 from enum import Enum
 from typing import Any, Mapping
 from urllib.parse import unquote
@@ -969,6 +970,21 @@ class Robinhood(InstrumentManager, SessionManager):
                 context={"option_id": option_id},
             )
 
+    def get_option_chainid(self, symbol):
+        """DEPRECATED — use :meth:`get_option_chain_id` instead.
+
+        Backward-compatibility shim for the ``get_option_chainid`` ->
+        ``get_option_chain_id`` rename dropped in commit ``1cdb2ac`` without
+        a shim (issue #186). Emits ``DeprecationWarning`` and forwards to
+        the new method. Will be removed in the next major release.
+        """
+        warnings.warn(
+            "'get_option_chainid' is deprecated; use 'get_option_chain_id' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_option_chain_id(symbol)
+
     def get_option_chain_id(self, symbol):
         # Issue #135: two ``get_url`` calls — instrument lookup and chain
         # discovery. Either can hit a Robinhood outage; both need dispatcher
@@ -1037,6 +1053,21 @@ class Robinhood(InstrumentManager, SessionManager):
     #                           GET FUNDAMENTALS
     ###########################################################################
 
+    def get_fundamentals(self, stock=""):
+        """DEPRECATED — use :meth:`fundamentals` instead.
+
+        Backward-compatibility shim for the ``get_fundamentals`` ->
+        ``fundamentals`` rename dropped in commit ``1cdb2ac`` without a
+        shim (issue #186). Emits ``DeprecationWarning`` and forwards to
+        the new method. Will be removed in the next major release.
+        """
+        warnings.warn(
+            "'get_fundamentals' is deprecated; use 'fundamentals' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.fundamentals(stock)
+
     def fundamentals(self, stock=""):
         """Find stock fundamentals data
 
@@ -1087,15 +1118,26 @@ class Robinhood(InstrumentManager, SessionManager):
                 context={"resource": "portfolio"},
             )
 
-    def order_history(self, order_id=None):
+    def order_history(self, order_id=None, orderId=None):
         """Wrapper for portfolios
 
         Optional Args: add an order ID to retrieve information about a single order.
+
+        Args:
+            order_id (str): canonical kwarg — the id of the order to fetch.
+            orderId (str): DEPRECATED — legacy camelCase form of ``order_id``
+                kept as a BC shim for the rename dropped in commit
+                ``1cdb2ac`` without a shim (issue #186). Passing this emits
+                ``DeprecationWarning``; passing both ``order_id`` and
+                ``orderId`` raises ``TypeError``.
 
         Returns:
             (:obj:`dict`): JSON dict from getting orders
 
         """
+        order_id = coalesce_deprecated_kwarg(
+            "order_id", order_id, "orderId", orderId
+        )
 
         # Issue #137 Phase A: translate HTTP errors via the shared dispatcher.
         try:
