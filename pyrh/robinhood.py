@@ -104,9 +104,14 @@ def _raise_for_http_error(
             message is byte-identical to pre-#150 pyrh releases
             (backwards-compatibility invariant).
 
-    Always re-raises — never returns — and uses ``from None`` so the HTTP
-    stack trace does not leak to callers (matches the pattern shipped for
-    ``_try_refresh`` in the auth refactor).
+    Always re-raises — never returns. Uses ``from e`` (issue #127) so the
+    upstream ``requests.HTTPError`` traceback remains attached via
+    ``__cause__``. Quote / options / portfolio / order endpoints don't
+    carry credentials in HTTP error context, so debuggability wins over
+    credential-leak suppression — the ``from None`` pattern used in the
+    ``_try_refresh`` auth-refresh path is the right choice THERE (that
+    path receives bearer tokens in the failing request) but is cargo-cult
+    HERE.
     """
     context_str = _format_context(context)
 
@@ -114,7 +119,7 @@ def _raise_for_http_error(
     status_code = getattr(response, "status_code", None) if response is not None else None
 
     if status_code is not None and 500 <= status_code < 600:
-        raise RobinhoodServerError(status_code, context_str) from None
+        raise RobinhoodServerError(status_code, context_str) from err
     if status_code == 429:
         retry_after_raw = (
             response.headers.get("Retry-After") if response is not None else None
@@ -125,15 +130,15 @@ def _raise_for_http_error(
             retry_after = None
         raise RobinhoodRateLimitError(
             retry_after=retry_after, context_str=context_str
-        ) from None
+        ) from err
     # Issue #140: 401 / 403 get their own class so callers can distinguish
     # "auth token expired — prompt re-login" from "resource not found".
     # Checked BEFORE the per-caller fallback so EVERY dispatcher-routed
     # method (quote, options, portfolio, order, etc.) benefits — not just
     # the ones that happen to pass ``InvalidTickerSymbol`` as fallback.
     if status_code in (401, 403):
-        raise RobinhoodAuthError(status_code, context_str) from None
-    raise fallback_exc(context_str) from None
+        raise RobinhoodAuthError(status_code, context_str) from err
+    raise fallback_exc(context_str) from err
 
 
 # Backwards-compatible alias. Keeps any external caller (test helpers, fixtures,
