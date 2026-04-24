@@ -406,25 +406,82 @@ class Robinhood(InstrumentManager, SessionManager):
                 },
             )
 
-    def get_news(self, stock):
-        """Fetch news endpoint.
+    #: Safety cap for :py:meth:`get_news` pagination. The Robinhood
+    #: ``/midlands/news/{ticker}/`` endpoint currently returns a single
+    #: page with ``next: null``, but the paginated response shape is
+    #: present and the server could start emitting a cursor at any time.
+    #: A legitimate news feed should never exceed this cap; hitting it
+    #: indicates a pathological paginator response (cycle / same ``next``
+    #: URL forever). We bail out with whatever was collected rather than
+    #: spinning forever so callers can log + move on.
+    _GET_NEWS_PAGINATION_CAP = 100
+
+    def get_news(self, stock, limit=None):
+        """Fetch news articles for a ticker.
+
+        Follows the Robinhood ``next`` pagination cursor until exhausted
+        (up to :py:attr:`_GET_NEWS_PAGINATION_CAP` pages), merging results
+        into a single flat list. Stops early when ``limit`` articles have
+        been collected (may stop mid-page).
+
+        **Breaking change vs. earlier pyrh releases**: this method now
+        returns a flat ``list[dict]`` of news articles. The previous
+        implementation returned the raw response wrapper dict
+        (``{count, next, previous, results}``); callers that dug into
+        ``["results"]`` need to drop that hop.
 
         Args:
-            stock (str): stock ticker
+            stock (str): stock ticker (Robinhood canonicalises e.g.
+                ``BRK.B`` to ``BRK-B``; caller is responsible for any
+                symbol normalisation).
+            limit (int | None): optional cap on articles returned;
+                ``None`` (default) returns everything available.
 
         Returns:
-            (:obj:`dict`) values returned from `news` endpoint
+            list[dict]: news articles in server-returned order. Each
+            article dict is preserved verbatim so downstream callers
+            can use fields this library doesn't explicitly document.
+            Observed fields include ``uuid``, ``url``, ``source``,
+            ``title``, ``summary``, ``author``, ``published_at``,
+            ``updated_at``, ``preview_image_url``, ``preview_text``,
+            ``relay_url``, ``num_clicks``, ``currency_id``,
+            ``api_source``, ``related_instruments``.
 
+        Raises:
+            InvalidTickerSymbol: on 4xx (ticker not recognised).
+            RobinhoodServerError: on 5xx (Robinhood outage).
+            RobinhoodRateLimitError: on 429 (back off; inspect
+                ``Retry-After``).
         """
-
-        # Issue #137 Phase B: translate HTTP errors via the shared dispatcher.
-        # ``get_news`` takes a ticker, so a 4xx here is legacy "bad ticker"
-        # input (fallback: ``InvalidTickerSymbol``); 5xx / 429 surface as
-        # ``RobinhoodServerError`` / ``RobinhoodRateLimitError`` instead of
-        # leaking raw ``requests.HTTPError``.
+        # Issue #137 Phase B: translate HTTP errors via the shared
+        # dispatcher. ``get_news`` takes a ticker, so a 4xx here is
+        # legacy "bad ticker" input (fallback: ``InvalidTickerSymbol``);
+        # 5xx / 429 surface as ``RobinhoodServerError`` /
+        # ``RobinhoodRateLimitError`` instead of leaking raw
+        # ``requests.HTTPError``.
         ticker = stock.upper()
         try:
-            return self.get_url(urls.news(ticker))
+            # Pagination: follow ``next`` cursor until it's None or we
+            # hit the safety cap. ``get_url`` accepts either a yarl.URL
+            # (page 1) or a plain string (subsequent pages — the server
+            # returns a fully-formed absolute URL in ``next``).
+            articles = []
+            page_url = urls.news(ticker)
+            pages_fetched = 0
+            while page_url is not None:
+                if pages_fetched >= self._GET_NEWS_PAGINATION_CAP:
+                    # Bail out with whatever we collected; do NOT raise
+                    # — callers should still receive the partial feed
+                    # they can work with, and the cap prevents an
+                    # infinite spin on a cyclic paginator response.
+                    break
+                page = self.get_url(page_url)
+                articles.extend(page.get("results", []))
+                if limit is not None and len(articles) >= limit:
+                    return articles[:limit]
+                page_url = page.get("next")
+                pages_fetched += 1
+            return articles
         except requests.exceptions.HTTPError as e:
             # Issue #150: surface the ticker for debuggability.
             _raise_for_http_error(e, context={"ticker": ticker})
