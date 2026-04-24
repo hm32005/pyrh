@@ -967,6 +967,72 @@ class Robinhood(InstrumentManager, SessionManager):
                 context={"option_id": option_id},
             )
 
+    #: Default batch size for :py:meth:`get_option_market_data_batch`.
+    #: Mirrors the pattern used by :py:meth:`get_stock_marketdata` for stock
+    #: quotes. 40 URLs per call keeps each request under Robinhood's query
+    #: string length limits with comfortable headroom while cutting daily
+    #: scan cost ~40x vs per-contract fetches (12,800 contracts -> 320 calls
+    #: instead of 12,800).
+    _OPTION_MARKET_DATA_BATCH_DEFAULT_SIZE = 40
+
+    def get_option_market_data_batch(
+        self, instrument_urls, batch_size=None
+    ):
+        """Batch-fetch option market data for multiple contracts in one round-trip.
+
+        Hits ``GET /marketdata/options/?instruments=url1,url2,...`` in chunks of
+        ``batch_size`` instrument URLs. Returns the concatenated list of
+        market-data dicts in the same order as the input URLs.
+
+        This is the efficient sibling of :py:meth:`get_option_market_data`,
+        which fetches one contract at a time. Use the batched form for any
+        workload pricing more than a handful of contracts (daily scans,
+        portfolio-wide Greeks refresh, etc.).
+
+        Args:
+            instrument_urls: List of full option instrument URLs (as returned
+                in the ``url`` field of each row from
+                :py:meth:`get_options`).
+            batch_size: URLs per HTTP call. Defaults to
+                :py:attr:`_OPTION_MARKET_DATA_BATCH_DEFAULT_SIZE` (40). Tune
+                down if you hit URL-length or per-request size limits; tune
+                up carefully — Robinhood has been observed to truncate
+                responses silently above ~100.
+
+        Returns:
+            List of market-data dicts, one per input URL, in input order.
+            Each dict contains Robinhood's standard option-quote fields:
+            ``bid_price``, ``ask_price``, ``mark_price``, ``adjusted_mark_price``,
+            ``last_trade_price``, ``break_even_price``, ``volume``,
+            ``open_interest``, ``implied_volatility``, ``delta``, ``gamma``,
+            ``theta``, ``vega``, ``rho``, ``chance_of_profit_long``,
+            ``chance_of_profit_short``, plus the ``instrument`` URL itself.
+            Empty list for empty input (no HTTP calls made).
+        """
+        if not instrument_urls:
+            return []
+        size = (
+            batch_size
+            if batch_size is not None
+            else self._OPTION_MARKET_DATA_BATCH_DEFAULT_SIZE
+        )
+        results = []
+        for i in range(0, len(instrument_urls), size):
+            batch = instrument_urls[i : i + size]
+            # Go through session.get directly (not self.get_url) because the
+            # batched endpoint's query string is built here and we want a
+            # plain HTTP round-trip without the schema-deserialisation path.
+            # The session already has auth headers + retry config wired by
+            # SessionManager; this just shapes the URL + params.
+            response = self.session.get(
+                str(urls.MARKET_DATA_BASE / "options/"),
+                params={"instruments": ",".join(batch)},
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            results.extend(payload.get("results", []))
+        return results
+
     def options_owned(self):
         # Issue #135: translate 5xx/429 on the options-positions endpoint to
         # the informative ``RobinhoodServerError`` / ``RobinhoodRateLimitError``
