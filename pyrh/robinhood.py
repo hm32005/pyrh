@@ -63,6 +63,53 @@ def _format_context(context: Mapping[str, Any] | None) -> str:
     return ", ".join(f"{key}={value}" for key, value in context.items())
 
 
+def _parse_retry_after(header: str | None) -> int | None:
+    """Parse a ``Retry-After`` header into an int of seconds.
+
+    RFC 7231 §7.1.3 defines two forms:
+
+    * **delta-seconds** — plain integer like ``"42"``.
+    * **HTTP-date**     — RFC 7231 date like ``"Wed, 21 Oct 2015 07:28:00 GMT"``.
+
+    Issue #124: the previous implementation only parsed the integer form,
+    silently returning ``None`` for the HTTP-date form. If the Robinhood
+    backend ever emits an HTTP-date during a maintenance window, callers
+    lose the backoff hint. This helper handles both forms and clamps
+    negative deltas (past dates) to ``0`` — an HTTP-date in the past means
+    "you can retry now", not "back off forever".
+
+    Returns ``None`` for unparseable input (neither int nor HTTP-date), to
+    preserve legacy behaviour for callers that ``if retry_after is not None``
+    gate their backoff logic.
+    """
+    if header is None:
+        return None
+    try:
+        return int(header)
+    except (TypeError, ValueError):
+        pass
+    # HTTP-date form. ``parsedate_to_datetime`` returns a tz-aware datetime
+    # when the header includes a GMT / UTC offset, which RFC 7231 mandates
+    # ("MUST be in GMT"). If the input is malformed it raises ``ValueError``
+    # (Python 3.10+) or ``TypeError``; both cases fall through to ``None``.
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+
+        target = parsedate_to_datetime(header)
+        if target is None:
+            return None
+        # Naive datetimes from legacy callers get assumed-UTC to avoid the
+        # ``can't subtract naive and aware`` TypeError at the delta step.
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        delta = (target - datetime.now(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    # Past dates clamp to 0 — semantically "retry now", never negative.
+    return max(0, int(delta))
+
+
 def _raise_for_http_error(
     err: requests.exceptions.HTTPError,
     *,
@@ -117,10 +164,11 @@ def _raise_for_http_error(
         retry_after_raw = (
             response.headers.get("Retry-After") if response is not None else None
         )
-        try:
-            retry_after = int(retry_after_raw) if retry_after_raw is not None else None
-        except (TypeError, ValueError):
-            retry_after = None
+        # Issue #124: delegates both the integer form and the RFC 7231 §7.1.3
+        # HTTP-date form to ``_parse_retry_after``. Previously only the
+        # integer form was handled; HTTP-date values silently fell through
+        # to ``retry_after=None`` and callers lost the backoff signal.
+        retry_after = _parse_retry_after(retry_after_raw)
         raise RobinhoodRateLimitError(
             retry_after=retry_after, context_str=context_str
         ) from None
