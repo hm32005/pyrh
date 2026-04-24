@@ -720,6 +720,29 @@ class Robinhood(InstrumentManager, SessionManager):
         # directly. This wrapper covers the intermediate
         # ``get_url(self.quote_data(...)["instrument"])`` AND the final
         # ``get_url(urls.instruments(...))`` call sites.
+        #
+        # Issue #143: the outer ``except requests.HTTPError`` below looks
+        # like it catches failures from both ``quote_data`` and
+        # ``get_url(...)``, but in practice ``quote_data`` NEVER raises
+        # ``requests.HTTPError`` — it re-raises via the shared dispatcher,
+        # which maps everything into the pyrh hierarchy
+        # (``PyrhException`` subclasses: ``RobinhoodServerError``,
+        # ``RobinhoodRateLimitError``, ``InvalidTickerSymbol``). None of
+        # those inherit from ``requests.HTTPError``, so they propagate
+        # around the outer ``except`` unchanged (the correct behavior —
+        # the inner dispatch already produced the right exception).
+        #
+        # What the outer ``except requests.HTTPError`` DOES catch:
+        #     1. ``self.get_url(self.quote_data(...)["instrument"])`` —
+        #        the instrument-URL resolution step (raw ``get_url``, NOT
+        #        dispatcher-wrapped).
+        #     2. ``self.get_url(popularity_url)`` — the final popularity
+        #        lookup (raw ``get_url``).
+        #
+        # DO NOT widen to ``except Exception`` here — that would swallow
+        # the pyrh-hierarchy exceptions pre-raised by ``quote_data`` and
+        # re-wrap them as ``InvalidTickerSymbol`` in the fallback branch,
+        # erasing the 5xx / 429 signal the dispatcher worked to preserve.
         try:
             stock_instrument = self.get_url(self.quote_data(stock)["instrument"])["id"]
             # Issue #182: the previous call ``urls.instruments(stock_instrument,
