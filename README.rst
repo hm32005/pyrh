@@ -85,6 +85,36 @@ Clone the repository and install jupyter capabilities.
 
 Now just run the files in the example.
 
+Seeing deprecation warnings from pyrh
+*************************************
+
+pyrh uses backward-compatibility (BC) shims to rename public kwargs
+without breaking existing callers. The shim (``coalesce_deprecated_kwarg``
+in ``pyrh/util/deprecation.py``) emits a ``DeprecationWarning`` when a
+caller passes the old kwarg name — for example, passing
+``instrument_URL=...`` instead of the new ``instrument_url=...``.
+
+**Why you may not see the warning:** Python silences
+``DeprecationWarning`` by default outside ``__main__``. If you import
+pyrh from application code, your Python interpreter will not show these
+warnings unless you explicitly opt in. You will then be surprised when
+the old kwarg is removed in a future major release.
+
+**How to surface them:** run your script or test suite with either of
+these:
+
+.. code-block::
+
+   # Option 1: precise flag — surface DeprecationWarning only
+   python -W default::DeprecationWarning my_script.py
+
+   # Option 2: dev mode — surfaces DeprecationWarning plus other dev-only
+   # checks (slower, but finds more issues)
+   PYTHONDEVMODE=1 python my_script.py
+
+CI pipelines and local dev environments should enable one of these so
+renames land in a test run — not in production after a pyrh upgrade.
+
 Related
 *******
 
