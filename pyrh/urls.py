@@ -94,6 +94,12 @@ def instruments(
     Returns:
         A constructed URL with the embedded query parameter
 
+    Raises:
+        ValueError: When none of ``symbol``, ``query``, or ``id_`` is provided.
+            Previously this returned ``None`` silently, causing downstream
+            callers to raise ``requests.exceptions.MissingSchema: Invalid URL
+            'None'`` far from the actual bug (issue #78).
+
     """
     # Note:
     # INSTRUMENTS_BASE/{instrument_id}/splits will not be implemented since the url is
@@ -105,6 +111,10 @@ def instruments(
         return INSTRUMENTS_BASE.with_query(query=query)
     elif id_ is not None:
         return INSTRUMENTS_BASE / f"{id_}/"
+    else:
+        raise ValueError(
+            "instruments() requires at least one of: symbol, query, id_"
+        )
 
 
 def orders(order_id: Optional[str] = None) -> URL:

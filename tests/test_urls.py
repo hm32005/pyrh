@@ -72,11 +72,18 @@ def test_instruments_by_id():
     assert str(u) == f"{API_BASE}/instruments/00000000-0000-0000-0000-000000000000/"
 
 
-def test_instruments_no_args_returns_none():
+def test_instruments_no_args_raises_value_error():
+    """Issue #78: ``instruments()`` with no kwargs used to return ``None``
+    silently. Downstream callers then passed ``None`` to ``requests.get()``
+    which raised ``MissingSchema: Invalid URL 'None'`` — a confusing error
+    far from the actual bug. Fail loudly at the URL-builder instead.
+    """
+    import pytest
+
     from pyrh import urls
 
-    # All three args optional; passing none yields a None return.
-    assert urls.instruments() is None
+    with pytest.raises(ValueError, match="at least one of"):
+        urls.instruments()
 
 
 def test_orders_root_and_by_id():
