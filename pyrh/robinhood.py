@@ -1373,6 +1373,62 @@ class Robinhood(InstrumentManager, SessionManager):
             )
 
     ###########################################################################
+    #                           CRYPTO (NUMMUS) DATA
+    ###########################################################################
+
+    def crypto_portfolio(self):
+        """Return the crypto (Nummus) portfolio summary.
+
+        The crypto sub-account lives on ``https://nummus.robinhood.com/``
+        (not the main brokerage API host). Its portfolio summary surfaces
+        equity + market_value for the crypto holdings, which sit **outside**
+        the main brokerage portfolio totals — main ``/portfolios/`` does not
+        include any crypto equity.
+
+        Phantom-cash audit (2026-04-26) confirmed this endpoint is stable.
+        Investment-system "total wealth" views should sum
+        ``portfolio.equity`` + ``crypto_portfolio()['results'][0]['equity']``
+        to match the Robinhood website's "Total Account Value" header.
+
+        Returns:
+            (:obj:`dict`): JSON dict from the Nummus portfolios endpoint.
+        """
+
+        # No schema yet — Nummus payload differs from the main brokerage
+        # PortfolioSchema and has no test fixtures we can pin against.
+        # Issue #137 Phase A pattern: translate HTTP errors via the shared
+        # dispatcher with a session-scoped resource marker.
+        try:
+            return self.get_url(urls.NUMMUS_PORTFOLIOS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "crypto_portfolio"},
+            )
+
+    def crypto_holdings(self):
+        """Return the per-currency crypto (Nummus) holdings.
+
+        Each holding has a ``currency`` block (with ``code`` like ``"BTC"``,
+        ``"USDC"``, etc.) and a ``quantity`` field. Use this when you need
+        to enumerate which coins the user holds — ``crypto_portfolio()``
+        only returns the rolled-up equity total.
+
+        Returns:
+            (:obj:`dict`): JSON dict from the Nummus holdings endpoint.
+        """
+
+        try:
+            return self.get_url(urls.NUMMUS_HOLDINGS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "crypto_holdings"},
+            )
+
+    ###########################################################################
     #                               PLACE ORDER
     ###########################################################################
 
