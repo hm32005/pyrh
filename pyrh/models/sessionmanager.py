@@ -195,9 +195,18 @@ class SessionManager(BaseModel):
 
         epoch_time = pendulum.datetime(1970, 1, 1, tz="UTC")
 
+        # getattr with a default guards against two cases:
+        #   1. OAuth constructed without expires_at (e.g. direct login flow) —
+        #      expires_in is never set in that path, so the attribute is absent.
+        #   2. Any future caller that omits expires_at from the kwargs dict.
+        # The IS-credentials bridge previously triggered case 1 (it stripped
+        # expires_at from the dict); it now passes a parsed pendulum.DateTime so
+        # OAuth.__init__ computes expires_in correctly.  The getattr is kept as
+        # defensive code for the other cases above.
+        _expires_in = getattr(self.oauth, "expires_in", None)
         self.expires_at: pendulum.datetime = (
-            pendulum.now("UTC").add(seconds=self.oauth.expires_in)
-            if hasattr(self.oauth, "access_token") and self.oauth.expires_in
+            pendulum.now("UTC").add(seconds=_expires_in)
+            if hasattr(self.oauth, "access_token") and _expires_in
             else epoch_time
         )
 
