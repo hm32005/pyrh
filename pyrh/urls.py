@@ -45,6 +45,17 @@ INVESTMENT_PROFILE = USER / "investment_profile/"
 QUOTES = API_BASE / "quotes/"
 HISTORICALS = QUOTES / "historicals/"
 
+# Crypto (Nummus)
+# The Robinhood crypto sub-account is served from a separate host
+# (``nummus.robinhood.com``), not the main brokerage API. These two endpoints
+# expose the crypto portfolio summary and per-currency holdings respectively.
+# Phantom-cash audit (2026-04-26) confirmed both URLs are stable; main-brokerage
+# /portfolios/ does not include the crypto equity, so callers that want a
+# "total wealth" view must hit Nummus separately.
+NUMMUS_BASE: URL = URL("https://nummus.robinhood.com")
+NUMMUS_PORTFOLIOS: URL = NUMMUS_BASE / "portfolios/"
+NUMMUS_HOLDINGS: URL = NUMMUS_BASE / "holdings/"
+
 # Auth
 OAUTH_BASE: URL = API_BASE / "oauth2/"
 OAUTH: URL = OAUTH_BASE / "token/"
