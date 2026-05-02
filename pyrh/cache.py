@@ -1,12 +1,22 @@
 # coding=utf-8
-"""Project config/cache files."""
+"""Project config/cache files.
+
+The eager ``from pyrh.robinhood import Robinhood, RobinhoodSchema`` was
+moved into the function bodies so that ``import pyrh.cache`` (and
+transitively ``import pyrh`` / ``import pyrh.credentials``) doesn't pull
+``marshmallow`` and the rest of the model graph (~400 modules, plus
+TLS/CFNetwork init on macOS). Type annotations use the string form +
+``TYPE_CHECKING`` to keep the public signatures intact.
+"""
 
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 from pyrh.exceptions import InvalidCacheFile
-from pyrh.robinhood import Robinhood, RobinhoodSchema
+
+if TYPE_CHECKING:
+    from pyrh.robinhood import Robinhood
 
 CACHE_ROOT: Path = Path("~/.robinhood").expanduser()
 """The root directory where cache and config files are stores.
@@ -26,7 +36,7 @@ CACHE_LOGIN.touch(exist_ok=True)
 # https://github.com/terrencepreilly/darglint/issues/81
 
 
-def dump_session(robinhood: Robinhood, path: Optional[Union[Path, str]] = None) -> None:
+def dump_session(robinhood: "Robinhood", path: Optional[Union[Path, str]] = None) -> None:
     """Save the current session parameters to a json file.
 
     Note:
@@ -38,6 +48,8 @@ def dump_session(robinhood: Robinhood, path: Optional[Union[Path, str]] = None) 
         path: The location to save the file and its name.
 
     """
+    from pyrh.robinhood import RobinhoodSchema
+
     path = CACHE_LOGIN if path is None else path
     json_str = RobinhoodSchema().dumps(robinhood, indent=4)
 
@@ -45,7 +57,7 @@ def dump_session(robinhood: Robinhood, path: Optional[Union[Path, str]] = None) 
         file.write(json_str)
 
 
-def load_session(path: Optional[Union[Path, str]] = None) -> Robinhood:
+def load_session(path: Optional[Union[Path, str]] = None) -> "Robinhood":
     """Load cached session parameters from a json file.
 
     Note:
@@ -62,6 +74,8 @@ def load_session(path: Optional[Union[Path, str]] = None) -> Robinhood:
         InvalidCacheFile: If the cache file cannot be decoded or does not exist
 
     """
+    from pyrh.robinhood import Robinhood, RobinhoodSchema
+
     path = path or CACHE_LOGIN
     try:
         with open(path) as file:
