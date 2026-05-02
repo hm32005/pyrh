@@ -26,7 +26,7 @@
 
 ## Prior-round context
 
-- The 2026-04-17 coverage pass on `pyrh/` landed auth hardening in `pyrh/models/{oauth,sessionmanager}.py` (PR #2 on GitHub), bringing those two modules to 99–100 % line + branch. `pyrh/robinhood.py` was intentionally skipped in that pass; see `tasks/review-2026-04-17-summary.md` for the full rationale.
+- The 2026-04-17 coverage pass on `pyrh/` landed auth hardening in `pyrh/models/{oauth,sessionmanager}.py` (PR #2 on GitHub), bringing those two modules to 99–100 % line + branch. `pyrh/robinhood.py` was intentionally skipped in that pass; see `investment-system-docs/docs/reviews/2026-04-17-coverage-review/pyrh.md` for the full rationale.
 
 ## Checklist for the follow-up session
 
