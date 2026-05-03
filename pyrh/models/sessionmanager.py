@@ -213,6 +213,33 @@ class SessionManager(BaseModel):
         self.__logger.info("expires_at done!")
         self.__logger.info(f"type(self.expires_at): {type(self.expires_at)}")
 
+        # Pre-set the Authorization header from the loaded OAuth's
+        # access_token when it's still valid. Without this, the first
+        # HTTP request sent through ``self.session`` carries no Bearer
+        # header, RH returns 401, and the auto_login path inside _get/
+        # _post triggers a refresh — consuming RH's single-use
+        # refresh_token on every Robinhood() init even when the cached
+        # access_token is perfectly valid.
+        #
+        # Symptom this fixes: every consumer that loads tokens from
+        # disk (e.g. ~/.pyrh/credentials.json) and constructs a
+        # Robinhood instance was rotating the refresh_token on every
+        # invocation. Concurrent or back-to-back consumers therefore
+        # got HTTP 401 because the first one consumed the rotation.
+        # Verified by tracing pyrh.models.sessionmanager.login() —
+        # the only callers are _get/_post on auto_login, and they only
+        # fire when ``Authorization`` is missing OR ``token_expired``.
+        # Setting the header here removes the missing-header trigger
+        # for the valid-token case.
+        if (
+            hasattr(self.oauth, "access_token")
+            and self.oauth.access_token
+            and pendulum.now("UTC") < self.expires_at
+        ):
+            self.session.headers.update(
+                {"Authorization": f"Bearer {self.oauth.access_token}"}
+            )
+
         super().__init__(**kwargs)
         self.__logger.info("super() done!")
 
