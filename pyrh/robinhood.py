@@ -1273,6 +1273,177 @@ class Robinhood(InstrumentManager, SessionManager):
                 context={"resource": "portfolio"},
             )
 
+    def portfolio_performance(
+        self,
+        account_number,
+        *,
+        display_span="year",
+        include_all_hours=True,
+    ):
+        """Fetch the time-series that powers RH's UI portfolio chart.
+
+        Args:
+            account_number: RH account number (from ``get_account()``).
+            display_span: one of ``day`` / ``week`` / ``month`` / ``3month`` /
+                ``year`` / ``5year`` / ``all``. Default ``year``.
+            include_all_hours: include extended-hours points.
+
+        Returns:
+            (:obj:`dict`): UI-shaped JSON. Data points live at
+            ``data["lines"][0]["segments"][0]["points"]``; each point has
+            ``cursor_data.label.value`` (e.g. ``"May 6, 2025"``) and
+            ``cursor_data.price_chart_data.dollar_value.amount`` for the
+            equity in USD as a high-precision string.
+
+        Replaces the deprecated ``/portfolios/historicals/{N}/?span=...``
+        endpoint which now returns 404 for newer account formats. Verified
+        live 2026-05-06 against ``5QZ68688`` — returned 365 daily points
+        for ``display_span=year``.
+        """
+        url = (
+            urls.BONFIRE_PORTFOLIO_PERFORMANCE / f"{account_number}"
+        ).with_query(
+            chart_style="PERFORMANCE",
+            chart_type="historical_portfolio",
+            display_span=display_span,
+            include_all_hours=str(bool(include_all_hours)).lower(),
+        )
+        return self.get_url(url)
+
+    def portfolio_live(self, account_number):
+        """Real-time portfolio snapshot powering the chart's "now" point.
+
+        Returns a flat dict with sub-second-stale values: ``equity_market_value``,
+        ``cash``, ``brokerage_cash``, ``forex_market_value``, ``futures_market_value``,
+        ``futures_cash``, ``event_contracts_market_value``,
+        ``event_contracts_cash``, ``option_market_value``, ``pending_deposits``,
+        ``early_access_amount``, ``last_core_portfolio_equity``,
+        ``excess_maintenance_with_uncleared_deposits``, ``margin_used``,
+        ``deposit_adjusted_market_value``.
+        """
+        url = urls.BONFIRE_PORTFOLIO_LIVE / f"{account_number}/live"
+        return self.get_url(url)
+
+    def account_unified(self, account_number):
+        """Unified account view — equity + cash + margin in one payload.
+
+        Returns ``{portfolio_equity, account_buying_power,
+        cash_held_for_{equity,options,currency,dividends,orders,restrictions},
+        crypto, equities, options_buying_power, levered_amount,
+        near_margin_call, ...}``. Each currency-amount field is a
+        ``{amount, currency_code, currency_id}`` triple (high-precision
+        string for ``amount``).
+        """
+        url = urls.BONFIRE_ACCOUNTS_BASE / f"{account_number}/unified/"
+        return self.get_url(url)
+
+    def market_indices(self, keys):
+        """Fetch RH's market-index quotes for ``keys``.
+
+        Args:
+            keys: list of strings (e.g. ``["nasdaq", "sp_500"]``) or a
+                single string. RH joins them as comma-separated.
+
+        Returns ``{"indicators": [...]}``. Note: live probe 2026-05-06
+        returned an empty ``indicators`` array for an account without
+        market-data subscriptions — the endpoint accepts the keys
+        ``nasdaq`` / ``sp_500`` / ``sp500`` (lowercase) but data may be
+        gated. Other keys (SPX/INDU/etc.) return 400.
+        """
+        if isinstance(keys, str):
+            joined = keys
+        else:
+            joined = ",".join(keys)
+        url = urls.BONFIRE_MARKET_INDICES.with_query(keys=joined)
+        return self.get_url(url)
+
+    def status_banner(self):
+        """Fetch the UI status banner — system-wide announcements,
+        outage notices. Returns ``{"status_banner": {...}|None}``;
+        ``None`` means no active banner.
+        """
+        return self.get_url(urls.BONFIRE_STATUS_BANNER)
+
+    def eligible_programs(self, account_number):
+        """Programs the account qualifies for (Gold, instant deposits,
+        ACH transfers, etc.). Returns a list (empty when none active).
+        """
+        url = urls.BONFIRE_ELIGIBLE_PROGRAMS.with_query(
+            account_numbers=account_number,
+        )
+        return self.get_url(url)
+
+    def crypto_holdings(self):
+        """Paginated list of crypto holdings (Nummus host).
+
+        Distinct from ``portfolio()`` (which is brokerage equity only).
+        Each result item: ``{id, account_id, currency.{code,brand_color,
+        crypto_type,...}, quantity, quantity_available, quantity_held,
+        quantity_held_for_buy, quantity_held_for_sell, quantity_staked,
+        cost_bases, tax_lot_cost_bases, created_at, updated_at}``.
+
+        Returns ``{next, previous, results}`` per the standard RH list
+        envelope. Caller walks ``next`` for full pagination.
+        """
+        return self.get_url(urls.NUMMUS_HOLDINGS)
+
+    def crypto_position(self, position_id):
+        """Crypto position detail by position UUID (bonfire host)."""
+        url = urls.BONFIRE_CRYPTO_POSITION / f"{position_id}/"
+        return self.get_url(url)
+
+    def marketdata_quotes_by_id(
+        self,
+        instrument_ids,
+        *,
+        bounds="24_5",
+        include_bbo_source=True,
+        include_inactive=False,
+    ):
+        """Fetch quotes by instrument UUID (not ticker).
+
+        Args:
+            instrument_ids: single UUID string or list. Comma-joined for
+                the ``ids`` query param.
+            bounds: ``24_5`` (default — extended hours), ``regular``,
+                ``trading``, etc. Mirrors the RH UI's bounds enum.
+            include_bbo_source: include BBO (best bid / offer) source.
+            include_inactive: include positions in inactive instruments.
+
+        Distinct from ``get_quote()`` which keys on ticker symbol.
+        """
+        if isinstance(instrument_ids, str):
+            ids = instrument_ids
+        else:
+            ids = ",".join(instrument_ids)
+        url = urls.MARKETDATA_QUOTES.with_query(
+            ids=ids,
+            bounds=bounds,
+            include_bbo_source=str(bool(include_bbo_source)).lower(),
+            include_inactive=str(bool(include_inactive)).lower(),
+        )
+        return self.get_url(url)
+
+    def notifications_badge(self, user_uuid):
+        """Notifications badge count.
+
+        Returns ``{"shouldBadge": bool, "shouldCriticalBadge": bool}``.
+        ``user_uuid`` is the user's UUID from ``/user/`` (not the account
+        number). Note: query param is camelCase ``userUuid``.
+        """
+        url = urls.INBOX_NOTIFICATIONS_BADGE.with_query(userUuid=user_uuid)
+        return self.get_url(url)
+
+    def pathfinder_issues(self, *, active_only=True):
+        """Surfaced alerts (margin calls, restrictions, document upload
+        requests). Returns a list. ``active_only=True`` filters to
+        unresolved.
+        """
+        url = urls.PATHFINDER_ISSUES.with_query(
+            active_only=str(bool(active_only)).capitalize(),
+        )
+        return self.get_url(url)
+
     def order_history(self, order_id=None, orderId=None):
         """Wrapper for portfolios
 

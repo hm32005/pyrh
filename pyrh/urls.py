@@ -56,6 +56,71 @@ NUMMUS_BASE: URL = URL("https://nummus.robinhood.com")
 NUMMUS_PORTFOLIOS: URL = NUMMUS_BASE / "portfolios/"
 NUMMUS_HOLDINGS: URL = NUMMUS_BASE / "holdings/"
 
+# Bonfire — RH's UI-shaped data host. Distinct from api.robinhood.com:
+# bonfire serves the chart data, account-unified views, market indices,
+# and surface banners that the web/mobile UI consumes. Several endpoints
+# that used to live under api.robinhood.com (notably the portfolio
+# historicals time-series) have migrated here. Live probes 2026-05-06
+# confirmed bonfire is the active host for these.
+BONFIRE_BASE: URL = URL("https://bonfire.robinhood.com")
+
+# Portfolio chart time-series that powers RH's UI graph. Returns a
+# UI-shaped JSON whose data points live at
+# ``data.lines[0].segments[0].points[*].cursor_data``. Each point
+# carries a date label ("May 6, 2025") and
+# ``price_chart_data.dollar_value.amount`` for the equity in USD.
+# Required query params: chart_style=PERFORMANCE,
+# chart_type=historical_portfolio,
+# display_span={day|week|month|3month|year|5year|all},
+# include_all_hours={true|false}.
+#
+# Replaces the deprecated ``API_BASE/portfolios/historicals/{N}/`` path
+# which now returns 404 for newer account formats.
+BONFIRE_PORTFOLIO_PERFORMANCE: URL = BONFIRE_BASE / "portfolio/performance/"
+
+# Real-time portfolio for the chart's "now" point. Sub-second updates
+# during market hours. Path: ``portfolio/account/{account_number}/live``.
+BONFIRE_PORTFOLIO_LIVE: URL = BONFIRE_BASE / "portfolio/account/"
+
+# Unified account view. Aggregates equity / cash / margin / pending
+# transfers in a single payload — what the RH home screen reads.
+# Path: ``accounts/{account_number}/unified/``.
+BONFIRE_ACCOUNTS_BASE: URL = BONFIRE_BASE / "accounts/"
+
+# Market indices (Nasdaq, S&P 500, etc.) — query param ``keys`` is
+# comma-separated (e.g. ``?keys=nasdaq,sp_500``). Returns last-traded
+# value + UI-formatted change deltas.
+BONFIRE_MARKET_INDICES: URL = BONFIRE_BASE / "market_indices"
+
+# Crypto position detail by position UUID.
+BONFIRE_CRYPTO_POSITION: URL = BONFIRE_BASE / "crypto/details/position/"
+
+# UI status banner — system-wide announcements, outage notices, etc.
+BONFIRE_STATUS_BANNER: URL = BONFIRE_BASE / "app-comms/surface/status-banner"
+
+# PSP (Promotional Subscription Plan / Programs) eligibility. Pass
+# ``?account_numbers={N}``. Returns programs the account qualifies for
+# (Gold, ACH transfers, etc.).
+BONFIRE_ELIGIBLE_PROGRAMS: URL = BONFIRE_BASE / "psp/eligible_programs"
+
+# Quote-by-instrument-UUID under ``marketdata/quotes/``. Different from
+# the legacy ticker-based ``QUOTES`` URL — accepts ``?ids={uuid}`` and
+# returns full BBO + extended-hours data when ``include_bbo_source=true``.
+MARKETDATA_QUOTES: URL = MARKET_DATA_BASE / "quotes/"
+
+# Inbox / notifications badge count. Query param ``userUuid={uuid}``
+# (note: camelCase, not snake_case).
+INBOX_NOTIFICATIONS_BADGE: URL = API_BASE / "inbox/notifications/badge"
+
+# Goku LCM — RH's internal lifecycle messaging. Two versions exist; v2
+# is the current.
+GOKU_LCM: URL = API_BASE / "goku/lcm"
+GOKU_LCM_V2: URL = API_BASE / "goku/lcmv2"
+
+# Pathfinder issues — surfaced alerts (margin calls, restrictions,
+# document upload requests). ``?active_only=True`` filters to unresolved.
+PATHFINDER_ISSUES: URL = API_BASE / "pathfinder/issues/"
+
 # Auth
 OAUTH_BASE: URL = API_BASE / "oauth2/"
 OAUTH: URL = OAUTH_BASE / "token/"
