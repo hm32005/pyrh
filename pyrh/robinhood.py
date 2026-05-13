@@ -1308,7 +1308,14 @@ class Robinhood(InstrumentManager, SessionManager):
             display_span=display_span,
             include_all_hours=str(bool(include_all_hours)).lower(),
         )
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"account_number": account_number, "display_span": display_span},
+            )
 
     def portfolio_live(self, account_number):
         """Real-time portfolio snapshot powering the chart's "now" point.
@@ -1322,7 +1329,14 @@ class Robinhood(InstrumentManager, SessionManager):
         ``deposit_adjusted_market_value``.
         """
         url = urls.BONFIRE_PORTFOLIO_LIVE / f"{account_number}/live"
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"account_number": account_number},
+            )
 
     def account_unified(self, account_number):
         """Unified account view — equity + cash + margin in one payload.
@@ -1335,7 +1349,14 @@ class Robinhood(InstrumentManager, SessionManager):
         string for ``amount``).
         """
         url = urls.BONFIRE_ACCOUNTS_BASE / f"{account_number}/unified/"
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"account_number": account_number},
+            )
 
     def market_indices(self, keys):
         """Fetch RH's market-index quotes for ``keys``.
@@ -1355,14 +1376,28 @@ class Robinhood(InstrumentManager, SessionManager):
         else:
             joined = ",".join(keys)
         url = urls.BONFIRE_MARKET_INDICES.with_query(keys=joined)
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"keys": joined},
+            )
 
     def status_banner(self):
         """Fetch the UI status banner — system-wide announcements,
         outage notices. Returns ``{"status_banner": {...}|None}``;
         ``None`` means no active banner.
         """
-        return self.get_url(urls.BONFIRE_STATUS_BANNER)
+        try:
+            return self.get_url(urls.BONFIRE_STATUS_BANNER)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "status_banner"},
+            )
 
     def eligible_programs(self, account_number):
         """Programs the account qualifies for (Gold, instant deposits,
@@ -1371,7 +1406,14 @@ class Robinhood(InstrumentManager, SessionManager):
         url = urls.BONFIRE_ELIGIBLE_PROGRAMS.with_query(
             account_numbers=account_number,
         )
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"account_number": account_number},
+            )
 
     def crypto_holdings(self):
         """Paginated list of crypto holdings (Nummus host).
@@ -1385,12 +1427,26 @@ class Robinhood(InstrumentManager, SessionManager):
         Returns ``{next, previous, results}`` per the standard RH list
         envelope. Caller walks ``next`` for full pagination.
         """
-        return self.get_url(urls.NUMMUS_HOLDINGS)
+        try:
+            return self.get_url(urls.NUMMUS_HOLDINGS)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "crypto_holdings"},
+            )
 
     def crypto_position(self, position_id):
         """Crypto position detail by position UUID (bonfire host)."""
         url = urls.BONFIRE_CRYPTO_POSITION / f"{position_id}/"
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"position_id": position_id},
+            )
 
     def marketdata_quotes_by_id(
         self,
@@ -1422,7 +1478,14 @@ class Robinhood(InstrumentManager, SessionManager):
             include_bbo_source=str(bool(include_bbo_source)).lower(),
             include_inactive=str(bool(include_inactive)).lower(),
         )
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"ids": ids},
+            )
 
     def notifications_badge(self, user_uuid):
         """Notifications badge count.
@@ -1432,7 +1495,14 @@ class Robinhood(InstrumentManager, SessionManager):
         number). Note: query param is camelCase ``userUuid``.
         """
         url = urls.INBOX_NOTIFICATIONS_BADGE.with_query(userUuid=user_uuid)
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "notifications_badge"},
+            )
 
     def pathfinder_issues(self, *, active_only=True):
         """Surfaced alerts (margin calls, restrictions, document upload
@@ -1442,7 +1512,14 @@ class Robinhood(InstrumentManager, SessionManager):
         url = urls.PATHFINDER_ISSUES.with_query(
             active_only=str(bool(active_only)).capitalize(),
         )
-        return self.get_url(url)
+        try:
+            return self.get_url(url)
+        except requests.exceptions.HTTPError as e:
+            _raise_for_http_error(
+                e,
+                fallback_exc=RobinhoodResourceError,
+                context={"resource": "pathfinder_issues"},
+            )
 
     def order_history(self, order_id=None, orderId=None):
         """Wrapper for portfolios
