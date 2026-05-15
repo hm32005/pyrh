@@ -76,3 +76,6 @@ docs/stubs
 # Git worktrees
 .worktrees/
 worktrees/
+
+# Claude Code local config
+.claude/
