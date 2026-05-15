@@ -3,7 +3,7 @@
 Robinhood Authentication CLI (like gcpfed / gcloud auth login)
 
 Human-driven authentication for any pyrh-based application.
-Password is read via getpass (never stored, never in shell args or history).
+Password is read via getpass (never echoed, never in shell args or history).
 Tokens are saved to ~/.pyrh/credentials.json — the single canonical token
 store. Downstream consumers (investment-system, robinhood-data-downloader)
 read from this path directly.
@@ -19,15 +19,12 @@ SAFETY: This script ONLY authenticates. It never places orders.
 
 import argparse
 import getpass
-import json
 import logging
 import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
 try:
@@ -45,10 +42,15 @@ from pyrh.credentials import (
     get_credentials_path,
     revoke_session,
 )
+from pyrh.util import robinhood_headers
 
 
 def login() -> bool:
-    """Interactive login — password via getpass, tokens saved to file."""
+    """Interactive login — password via getpass, tokens saved to file.
+
+    On success, also verifies the written token against the live /portfolios/
+    endpoint and logs portfolio equity.
+    """
     print("\n  Robinhood Authentication")
     print("  " + "=" * 40)
 
@@ -78,11 +80,12 @@ def login() -> bool:
     device_token = (existing or {}).get("device_token") or str(uuid.uuid4())
 
     session = requests.Session()
-    session.headers["Content-Type"] = "application/json"
-    session.headers["User-Agent"] = "pyrh/2.2.0 (Personal Use)"
+    session.headers.update(robinhood_headers)
 
-    # Step 1: OAuth
-    res = session.post(str(urls.OAUTH), json={
+    # Build the payload dict before posting so we hold the reference cleanly.
+    # The password key is popped immediately after the Step 1 POST — it is
+    # never stored beyond that point.
+    oauth_payload = {
         "client_id": CLIENT_ID,
         "create_read_only_secondary_token": True,
         "device_token": device_token,
@@ -93,10 +96,12 @@ def login() -> bool:
         "scope": "internal",
         "token_request_path": "/login",
         "username": username,
-    }, timeout=30)
+    }
 
-    # Discard password immediately — never stored anywhere
+    # Step 1: OAuth — expects a 403 with verification_workflow on first attempt
+    res = session.post(str(urls.OAUTH), json=oauth_payload, timeout=30)
     del password
+    oauth_payload.pop("password")  # cleared; Step 5 replays without it
 
     body = res.json()
     if res.status_code != 403 or "verification_workflow" not in body:
@@ -104,19 +109,31 @@ def login() -> bool:
         return False
 
     workflow_id = body["verification_workflow"]["id"]
-    oauth_payload = json.loads(res.request.body)
 
     # Step 2: Machine + Challenge
-    session.headers["Content-Type"] = "application/json"
     res = session.post(str(urls.USER_MACHINE), json={
         "device_id": device_token, "flow": "suv",
         "input": {"workflow_id": workflow_id},
     }, timeout=30)
-    machine_id = res.json()["id"]
+    if res.status_code != 200:
+        logger.error("Machine step failed: HTTP %s — %s", res.status_code, res.text[:200])
+        return False
+    try:
+        machine_id = res.json()["id"]
+    except (ValueError, KeyError) as exc:
+        logger.error("Machine step response missing 'id': %s", exc)
+        return False
 
     user_view_url = f"https://api.robinhood.com/pathfinder/inquiries/{machine_id}/user_view/"
     res = session.get(user_view_url, timeout=30)
-    challenge_id = res.json()["context"]["sheriff_challenge"]["id"]
+    if res.status_code != 200:
+        logger.error("User-view step failed: HTTP %s — %s", res.status_code, res.text[:200])
+        return False
+    try:
+        challenge_id = res.json()["context"]["sheriff_challenge"]["id"]
+    except (ValueError, KeyError) as exc:
+        logger.error("User-view response missing sheriff_challenge id: %s", exc)
+        return False
 
     # Step 3: Device approval
     print("\n  *** APPROVE THE LOGIN ON YOUR ROBINHOOD APP ***\n")
@@ -126,14 +143,16 @@ def login() -> bool:
             f"https://api.robinhood.com/push/{challenge_id}/get_prompts_status/",
             timeout=30,
         )
-        if res.status_code == 200:
-            status = res.json().get("challenge_status", "unknown")
-            logger.info("  [%ds] %s", i * 5, status)
-            if status == "validated":
-                break
-            if status in ("denied", "expired"):
-                logger.error("Device approval %s", status)
-                return False
+        if res.status_code != 200:
+            logger.warning("  [%ds] Poll returned HTTP %s: %s", i * 5, res.status_code, res.text[:100])
+            continue
+        status = res.json().get("challenge_status", "unknown")
+        logger.info("  [%ds] %s", i * 5, status)
+        if status == "validated":
+            break
+        if status in ("denied", "expired"):
+            logger.error("Device approval %s", status)
+            return False
     else:
         logger.error("Device approval timed out (150s)")
         return False
@@ -146,7 +165,7 @@ def login() -> bool:
         logger.error("Workflow not approved")
         return False
 
-    # Step 5: Get token
+    # Step 5: Retry original OAuth request now that device approval is confirmed
     res = session.post(str(urls.OAUTH), json=oauth_payload, timeout=30)
     if res.status_code != 200:
         logger.error("Final auth failed: %s", res.status_code)
@@ -169,8 +188,6 @@ def login() -> bool:
     ).isoformat()
     token_data["created_at"] = datetime.now(tz=timezone.utc).isoformat()
 
-    del oauth_payload
-
     # Write to pyrh canonical path
     try:
         write_tokens(token_data)
@@ -186,12 +203,32 @@ def login() -> bool:
         expires_in / 86400,
     )
 
-    # Verify with a lightweight API call
-    session.headers["Authorization"] = f"Bearer {token_data['access_token']}"
-    test = session.get("https://api.robinhood.com/portfolios/", timeout=10)
-    if test.status_code == 200:
-        equity = test.json().get("results", [{}])[0].get("equity", "?")
-        logger.info("Portfolio equity: $%s", equity)
+    # Verify with a lightweight API call — non-200 is warned but not fatal
+    # (transient API hiccup shouldn't mask a successful credential write).
+    # 401/403 is fatal: it means the token is already rejected.
+    try:
+        session.headers["Authorization"] = f"Bearer {token_data['access_token']}"
+        test = session.get("https://api.robinhood.com/portfolios/", timeout=10)
+        if test.status_code == 200:
+            equity = test.json().get("results", [{}])[0].get("equity", "?")
+            logger.debug("Portfolio equity: $%s", equity)
+        elif test.status_code in (401, 403):
+            logger.error(
+                "Token written but immediately rejected by API (HTTP %s) — deleting credentials.",
+                test.status_code,
+            )
+            get_credentials_path().unlink(missing_ok=True)
+            return False
+        else:
+            logger.warning(
+                "Token written; API verify returned HTTP %s (may be transient). Run --status to confirm.",
+                test.status_code,
+            )
+    except requests.RequestException as exc:
+        logger.warning(
+            "Token written but could not verify against API (%s). Run --status to confirm.",
+            exc,
+        )
 
     cred_path = get_credentials_path()
     print(f"\n  Authentication complete.")
@@ -221,19 +258,24 @@ def check_status() -> None:
         print("  Run: python scripts/robinhood_login.py")
         return
 
-    if cred_path.exists():
-        mtime = datetime.fromtimestamp(cred_path.stat().st_mtime, tz=timezone.utc)
-        print(f"  Last updated: {mtime.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    created_at = cached.get("created_at", "")
+    if created_at:
+        print(f"  Last updated: {created_at[:19]} UTC")
 
     expires_at = cached.get("expires_at", "")
+    exp = None
     if expires_at:
-        exp = datetime.fromisoformat(str(expires_at))
+        try:
+            exp = datetime.fromisoformat(str(expires_at))
+        except ValueError:
+            print("  Status: AUTHENTICATED (expires_at unreadable — re-auth recommended)")
+
+    if exp is not None:
         if exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
         now = datetime.now(tz=timezone.utc)
         remaining = exp - now
-        hours = remaining.total_seconds() / 3600
-        days = hours / 24
+        days = remaining.total_seconds() / 86400
 
         if remaining.total_seconds() > 0:
             print(f"  Status: AUTHENTICATED")
@@ -241,12 +283,12 @@ def check_status() -> None:
         else:
             print(f"  Status: EXPIRED ({abs(days):.1f} days ago)")
             print(f"  Run: python scripts/robinhood_login.py")
-    else:
+    elif not expires_at:
         print("  Status: AUTHENTICATED (no expiry data)")
 
     session = requests.Session()
+    session.headers.update(robinhood_headers)
     session.headers["Authorization"] = f"Bearer {cached['access_token']}"
-    session.headers["User-Agent"] = "pyrh/2.2.0 (Personal Use)"
     try:
         res = session.get("https://api.robinhood.com/user/", timeout=10)
         if res.status_code == 200:
@@ -258,18 +300,26 @@ def check_status() -> None:
         print(f"  API: CONNECTION ERROR ({e})")
 
 
-def revoke() -> None:
-    """Revoke all stored tokens."""
+def revoke() -> bool:
+    """Revoke all stored tokens. Returns True iff server-side revocation confirmed."""
     print("\n  Revoking Tokens")
     print("  " + "=" * 40)
 
     try:
-        revoke_session()
+        ok = revoke_session()
+    except Exception as exc:
+        print(f"  Revocation error: {exc}", file=sys.stderr)
+        print()
+        return False
+
+    if ok:
         print("  All tokens revoked and credentials file deleted.")
-    except Exception as e:
-        print(f"  Revocation error: {e}")
+    else:
+        print("  WARNING: server-side revocation failed — token may still be live.", file=sys.stderr)
+        print("  Local file retained. Retry, or revoke at robinhood.com.")
 
     print()
+    return ok
 
 
 def where() -> None:
@@ -284,6 +334,7 @@ def where() -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     parser = argparse.ArgumentParser(
         description="Robinhood Authentication CLI",
         epilog="Like gcpfed/gcloud auth — human-driven auth, automatic token refresh.",
@@ -296,11 +347,11 @@ def main() -> None:
     if args.status:
         check_status()
     elif args.revoke:
-        revoke()
+        sys.exit(0 if revoke() else 1)
     elif args.where:
         where()
     else:
-        login()
+        sys.exit(0 if login() else 1)
 
 
 if __name__ == "__main__":
