@@ -24,7 +24,7 @@ include = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.12.7,<3.13"
+python = ">=3.12.7"
 
 # Doc Dependencies (need to be distributed for readthedocs)
 autodocsumm = { version = "^0.2.9", optional = true }
