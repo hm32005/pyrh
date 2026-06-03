@@ -77,7 +77,14 @@ def login() -> bool:
             file=sys.stderr,
         )
         existing = None
-    device_token = (existing or {}).get("device_token") or str(uuid.uuid4())
+    force_new_device = getattr(login, "_force_new_device", False)
+    device_token = (
+        str(uuid.uuid4())
+        if force_new_device
+        else ((existing or {}).get("device_token") or str(uuid.uuid4()))
+    )
+    if force_new_device:
+        logger.info("Using fresh device_token: %s", device_token)
 
     session = requests.Session()
     session.headers.update(robinhood_headers)
@@ -353,6 +360,10 @@ def main() -> None:
     parser.add_argument("--status", action="store_true", help="Check token health")
     parser.add_argument("--revoke", action="store_true", help="Revoke all tokens (emergency)")
     parser.add_argument("--where", action="store_true", help="Print credentials file path")
+    parser.add_argument(
+        "--new-device", action="store_true",
+        help="Force a fresh device_token (use when Robinhood isn't sending push notification)",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -362,6 +373,8 @@ def main() -> None:
     elif args.where:
         where()
     else:
+        if args.new_device:
+            login._force_new_device = True
         sys.exit(0 if login() else 1)
 
 
