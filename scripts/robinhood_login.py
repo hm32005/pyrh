@@ -2,11 +2,14 @@
 """
 Robinhood Authentication CLI (like gcpfed / gcloud auth login)
 
-Human-driven authentication for any pyrh-based application.
-Password is read via getpass (never echoed, never in shell args or history).
-Tokens are saved to ~/.pyrh/credentials.json — the single canonical token
-store. Downstream consumers (investment-system, robinhood-data-downloader)
-read from this path directly.
+Opens robinhood.com/login in a real browser window. You log in normally
+(including reCAPTCHA and app approval). The script intercepts the OAuth
+token response and saves it to ~/.pyrh/credentials.json.
+
+Why a browser? Robinhood added reCAPTCHA (gr_key/gr_token) to the password
+login endpoint in 2025. Scripts cannot generate reCAPTCHA tokens without a
+real browser runtime. Once bootstrapped, the daily refresh_auth_token DAG
+uses grant_type=refresh_token which does NOT require reCAPTCHA.
 
 Usage:
     python scripts/robinhood_login.py            # authenticate (interactive)
@@ -18,11 +21,8 @@ SAFETY: This script ONLY authenticates. It never places orders.
 """
 
 import argparse
-import getpass
 import logging
 import sys
-import time
-import uuid
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -33,8 +33,6 @@ except ImportError:
     print("ERROR: requests required. pip install requests")
     sys.exit(1)
 
-from pyrh.constants import CLIENT_ID, EXPIRATION_TIME
-from pyrh import urls
 from pyrh.credentials import (
     CredentialsFileCorruptError,
     read_tokens,
@@ -46,174 +44,94 @@ from pyrh.util import robinhood_headers
 
 
 def login() -> bool:
-    """Interactive login — password via getpass, tokens saved to file.
+    """Open robinhood.com/login in a browser, intercept the OAuth token response.
 
-    On success, also verifies the written token against the live /portfolios/
-    endpoint and logs portfolio equity.
+    The user logs in normally — reCAPTCHA and app approval all happen in the
+    real browser. We listen for the /oauth2/token/ response and extract tokens.
     """
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        print("ERROR: playwright required. Run: pip install playwright && playwright install chromium")
+        sys.exit(1)
+
     print("\n  Robinhood Authentication")
     print("  " + "=" * 40)
+    print("  A browser window will open. Log in normally at robinhood.com.")
+    print("  The script captures tokens automatically after you approve the login.")
+    print("  Do NOT close the browser — it closes itself after tokens are captured.\n")
 
-    # Read credentials securely — NEVER in shell args or history
-    username = input("  Email: ").strip()
-    password = getpass.getpass("  Password: ")
+    token_data = {}
 
-    print()
-    logger.info("Authenticating as %s...", username[:3] + "***")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, slow_mo=50)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
 
-    # Reuse existing device token if available, otherwise create one.
-    # A corrupt credentials file just means "start fresh" here since we're
-    # about to overwrite it with a new login anyway.
+        def handle_response(response):
+            if "/oauth2/token/" in response.url and not token_data:
+                try:
+                    body = response.json()
+                except Exception:
+                    return
+                if "access_token" in body:
+                    token_data.update(body)
+                    logger.info("Token captured from browser response.")
+
+        page.on("response", handle_response)
+        page.goto("https://robinhood.com/login", wait_until="domcontentloaded")
+
+        print("  Waiting for you to log in (timeout: 5 minutes)...")
+        try:
+            # Poll until tokens captured or timeout
+            page.wait_for_function(
+                "() => false",  # never true — we exit via token capture below
+                timeout=1000,
+            )
+        except PWTimeout:
+            pass
+
+        # Wait up to 5 minutes for the token to appear
+        deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+        while not token_data and datetime.now(timezone.utc) < deadline:
+            try:
+                page.wait_for_function("() => false", timeout=2000)
+            except PWTimeout:
+                pass
+
+        browser.close()
+
+    if not token_data:
+        logger.error("No token captured within 5 minutes. Did you complete the login?")
+        return False
+
+    # Enrich with metadata pyrh consumers expect
+    now = datetime.now(tz=timezone.utc)
+    expires_in = token_data.get("expires_in", 86400)
+    token_data["expires_at"] = (now + timedelta(seconds=expires_in)).isoformat()
+    token_data["created_at"] = now.isoformat()
+    token_data["version"] = 1
+    # Preserve existing device_token if present (keep account association)
     try:
         existing = read_tokens()
-    except CredentialsFileCorruptError as exc:
-        logger.warning(
-            "Existing credentials file is corrupt (%s); starting fresh login.",
-            exc.reason,
-        )
-        print(
-            f"  WARNING: existing credentials file is corrupt ({exc.reason}); "
-            "starting fresh login.",
-            file=sys.stderr,
-        )
-        existing = None
-    force_new_device = getattr(login, "_force_new_device", False)
-    device_token = (
-        str(uuid.uuid4())
-        if force_new_device
-        else ((existing or {}).get("device_token") or str(uuid.uuid4()))
-    )
-    if force_new_device:
-        logger.info("Using fresh device_token: %s", device_token)
+    except (CredentialsFileCorruptError, Exception):
+        existing = {}
+    if existing and existing.get("device_token") and "device_token" not in token_data:
+        token_data["device_token"] = existing["device_token"]
 
-    session = requests.Session()
-    session.headers.update(robinhood_headers)
-
-    # Build the payload dict before posting so we hold the reference cleanly.
-    # The password key is popped immediately after the Step 1 POST — it is
-    # never stored beyond that point.
-    oauth_payload = {
-        "client_id": CLIENT_ID,
-        "create_read_only_secondary_token": True,
-        "device_token": device_token,
-        "expires_in": EXPIRATION_TIME,
-        "grant_type": "password",
-        "password": password,
-        "request_id": str(uuid.uuid4()),
-        "scope": "internal",
-        "token_request_path": "/login",
-        "try_passkeys": False,
-        "username": username,
-    }
-
-    # Step 1: OAuth — expects a 403 with verification_workflow on first attempt.
-    # Robinhood's new flow (2025-05) requires try_passkeys=False in the payload.
-    res = session.post(str(urls.OAUTH), json=oauth_payload, timeout=30)
-    del password
-    oauth_payload.pop("password")  # cleared; Step 5 replays without it
-
-    body = res.json()
-    if res.status_code == 400:
-        detail = body.get("detail", "")
-        logger.error(
-            "Auth failed 400: %s\n"
-            "  If credentials are correct, Robinhood may be blocking this login.\n"
-            "  Try: log out and back in on the Robinhood app, then retry here.",
-            detail,
-        )
-        return False
-    if res.status_code != 403 or "verification_workflow" not in body:
-        logger.error("Auth failed: %s — body: %s", res.status_code, str(body)[:200])
-        return False
-
-    workflow_id = body["verification_workflow"]["id"]
-
-    # Step 2: Machine + Challenge
-    res = session.post(str(urls.USER_MACHINE), json={
-        "device_id": device_token, "flow": "suv",
-        "input": {"workflow_id": workflow_id},
-    }, timeout=30)
-    if res.status_code != 200:
-        logger.error("Machine step failed: HTTP %s — %s", res.status_code, res.text[:200])
-        return False
-    try:
-        machine_id = res.json()["id"]
-    except (ValueError, KeyError) as exc:
-        logger.error("Machine step response missing 'id': %s", exc)
-        return False
-
-    user_view_url = f"https://api.robinhood.com/pathfinder/inquiries/{machine_id}/user_view/"
-    res = session.get(user_view_url, timeout=30)
-    if res.status_code != 200:
-        logger.error("User-view step failed: HTTP %s — %s", res.status_code, res.text[:200])
-        return False
-    try:
-        challenge_id = res.json()["context"]["sheriff_challenge"]["id"]
-    except (ValueError, KeyError) as exc:
-        logger.error("User-view response missing sheriff_challenge id: %s", exc)
-        return False
-
-    # Step 3: Device approval
-    print("\n  *** APPROVE THE LOGIN ON YOUR ROBINHOOD APP ***\n")
-    for i in range(30):
-        time.sleep(5)
-        res = session.get(
-            f"https://api.robinhood.com/push/{challenge_id}/get_prompts_status/",
-            timeout=30,
-        )
-        if res.status_code != 200:
-            logger.warning("  [%ds] Poll returned HTTP %s: %s", i * 5, res.status_code, res.text[:100])
-            continue
-        status = res.json().get("challenge_status", "unknown")
-        logger.info("  [%ds] %s", i * 5, status)
-        if status == "validated":
-            break
-        if status in ("denied", "expired"):
-            logger.error("Device approval %s", status)
-            return False
-    else:
-        logger.error("Device approval timed out (150s)")
-        return False
-
-    # Step 4: Finalize
-    res = session.post(user_view_url, json={
-        "sequence": 0, "user_input": {"status": "continue"},
-    }, timeout=30)
-    if res.json().get("type_context", {}).get("result") != "workflow_status_approved":
-        logger.error("Workflow not approved")
-        return False
-
-    # Step 5: Retry original OAuth request now that device approval is confirmed
-    res = session.post(str(urls.OAUTH), json=oauth_payload, timeout=30)
-    if res.status_code != 200:
-        logger.error("Final auth failed: %s", res.status_code)
-        return False
-
-    token_data = res.json()
-
-    if "access_token" not in token_data:
-        logger.error(
-            "Authentication response missing access_token. Keys: %s",
-            list(token_data.keys()),
-        )
-        return False
-
-    expires_in = token_data.get("expires_in", 648000)
-    token_data["version"] = 1
-    token_data["device_token"] = device_token
-    token_data["expires_at"] = (
-        datetime.now(tz=timezone.utc) + timedelta(seconds=expires_in)
-    ).isoformat()
-    token_data["created_at"] = datetime.now(tz=timezone.utc).isoformat()
-
-    # Write to pyrh canonical path
     try:
         write_tokens(token_data)
     except OSError as exc:
         logger.error("Authentication succeeded but tokens could NOT be saved: %s", exc)
         print(f"\n  ERROR: Could not save tokens to {get_credentials_path()}")
         print(f"  Cause: {exc}")
-        print(f"  Fix: Check disk space and directory permissions, then re-authenticate.\n")
         return False
 
     logger.info(
@@ -221,15 +139,15 @@ def login() -> bool:
         expires_in / 86400,
     )
 
-    # Verify with a lightweight API call — non-200 is warned but not fatal
-    # (transient API hiccup shouldn't mask a successful credential write).
-    # 401/403 is fatal: it means the token is already rejected.
+    # Verify token is live
+    session = requests.Session()
+    session.headers.update(robinhood_headers)
+    session.headers["Authorization"] = f"Bearer {token_data['access_token']}"
     try:
-        session.headers["Authorization"] = f"Bearer {token_data['access_token']}"
         test = session.get("https://api.robinhood.com/portfolios/", timeout=10)
         if test.status_code == 200:
             equity = test.json().get("results", [{}])[0].get("equity", "?")
-            logger.debug("Portfolio equity: $%s", equity)
+            print(f"\n  Authentication complete. Portfolio equity: ${equity}")
         elif test.status_code in (401, 403):
             logger.error(
                 "Token written but immediately rejected by API (HTTP %s) — deleting credentials.",
@@ -238,19 +156,11 @@ def login() -> bool:
             get_credentials_path().unlink(missing_ok=True)
             return False
         else:
-            logger.warning(
-                "Token written; API verify returned HTTP %s (may be transient). Run --status to confirm.",
-                test.status_code,
-            )
+            logger.warning("Token written; API verify returned HTTP %s.", test.status_code)
     except requests.RequestException as exc:
-        logger.warning(
-            "Token written but could not verify against API (%s). Run --status to confirm.",
-            exc,
-        )
+        logger.warning("Token written but could not verify against API (%s).", exc)
 
-    cred_path = get_credentials_path()
-    print(f"\n  Authentication complete.")
-    print(f"  Credentials: {cred_path}")
+    print(f"  Credentials: {get_credentials_path()}")
     print(f"  All scripts will use this token automatically.\n")
     return True
 
@@ -294,7 +204,6 @@ def check_status() -> None:
         now = datetime.now(tz=timezone.utc)
         remaining = exp - now
         days = remaining.total_seconds() / 86400
-
         if remaining.total_seconds() > 0:
             print(f"  Status: AUTHENTICATED")
             print(f"  Expires: {expires_at[:19]} ({days:.1f} days remaining)")
@@ -355,15 +264,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     parser = argparse.ArgumentParser(
         description="Robinhood Authentication CLI",
-        epilog="Like gcpfed/gcloud auth — human-driven auth, automatic token refresh.",
+        epilog="Opens robinhood.com/login in a browser. Tokens captured automatically.",
     )
     parser.add_argument("--status", action="store_true", help="Check token health")
     parser.add_argument("--revoke", action="store_true", help="Revoke all tokens (emergency)")
     parser.add_argument("--where", action="store_true", help="Print credentials file path")
-    parser.add_argument(
-        "--new-device", action="store_true",
-        help="Force a fresh device_token (use when Robinhood isn't sending push notification)",
-    )
     args = parser.parse_args()
 
     if args.status:
@@ -373,8 +278,6 @@ def main() -> None:
     elif args.where:
         where()
     else:
-        if args.new_device:
-            login._force_new_device = True
         sys.exit(0 if login() else 1)
 
 
