@@ -95,17 +95,28 @@ def login() -> bool:
         "request_id": str(uuid.uuid4()),
         "scope": "internal",
         "token_request_path": "/login",
+        "try_passkeys": False,
         "username": username,
     }
 
-    # Step 1: OAuth — expects a 403 with verification_workflow on first attempt
+    # Step 1: OAuth — expects a 403 with verification_workflow on first attempt.
+    # Robinhood's new flow (2025-05) requires try_passkeys=False in the payload.
     res = session.post(str(urls.OAUTH), json=oauth_payload, timeout=30)
     del password
     oauth_payload.pop("password")  # cleared; Step 5 replays without it
 
     body = res.json()
+    if res.status_code == 400:
+        detail = body.get("detail", "")
+        logger.error(
+            "Auth failed 400: %s\n"
+            "  If credentials are correct, Robinhood may be blocking this login.\n"
+            "  Try: log out and back in on the Robinhood app, then retry here.",
+            detail,
+        )
+        return False
     if res.status_code != 403 or "verification_workflow" not in body:
-        logger.error("Auth failed: %s", res.status_code)
+        logger.error("Auth failed: %s — body: %s", res.status_code, str(body)[:200])
         return False
 
     workflow_id = body["verification_workflow"]["id"]
