@@ -759,6 +759,7 @@ class SessionManager(BaseModel):
             "refresh_token": self.oauth.refresh_token,
             "device_token": self.device_token,
             "scope": "internal",
+            "token_request_path": "/login",
         }
 
         try:
